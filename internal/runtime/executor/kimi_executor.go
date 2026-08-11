@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -570,49 +569,6 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 	}
 
 	return "[reasoning unavailable]"
-}
-
-// Refresh refreshes the Kimi token using the refresh token.
-func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	log.Debugf("kimi executor: refresh called")
-	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
-		return refreshed, err
-	}
-	if auth == nil {
-		return nil, fmt.Errorf("kimi executor: auth is nil")
-	}
-	// Expect refresh_token in metadata for OAuth-based accounts
-	var refreshToken string
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
-			refreshToken = v
-		}
-	}
-	if strings.TrimSpace(refreshToken) == "" {
-		// Nothing to refresh
-		return auth, nil
-	}
-
-	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
-	td, err := client.RefreshToken(ctx, refreshToken)
-	if err != nil {
-		return nil, err
-	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["access_token"] = td.AccessToken
-	if td.RefreshToken != "" {
-		auth.Metadata["refresh_token"] = td.RefreshToken
-	}
-	if td.ExpiresAt > 0 {
-		exp := time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
-		auth.Metadata["expired"] = exp
-	}
-	auth.Metadata["type"] = "kimi"
-	now := time.Now().Format(time.RFC3339)
-	auth.Metadata["last_refresh"] = now
-	return auth, nil
 }
 
 // applyKimiHeaders sets required headers for Kimi API requests.

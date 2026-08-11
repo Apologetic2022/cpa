@@ -28,6 +28,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Cursor      []*ModelInfo `json:"cursor"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -78,6 +79,37 @@ func GetKimiModels() []*ModelInfo {
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
+}
+
+// GetCursorModels returns Cursor Agent model definitions.
+// Remote catalogs may omit cursor; builtins keep the provider usable.
+func GetCursorModels() []*ModelInfo {
+	return WithCursorBuiltins(cloneModelInfos(getModels().Cursor))
+}
+
+// WithCursorBuiltins injects hard-coded Cursor Agent models that should not
+// disappear when upstream models.json has an empty cursor section.
+func WithCursorBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		cursorBuiltinModel("default", "Cursor Default", "Cursor Agent default model selector."),
+		cursorBuiltinModel("claude-4.6-sonnet", "Claude 4.6 Sonnet", "Cursor Agent Claude 4.6 Sonnet."),
+		cursorBuiltinModel("gpt-5.4", "GPT-5.4", "Cursor Agent GPT-5.4."),
+	)
+}
+
+func cursorBuiltinModel(id, displayName, description string) *ModelInfo {
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		Created:             1740960000,
+		OwnedBy:             "cursor",
+		Type:                "cursor",
+		DisplayName:         displayName,
+		Name:                id,
+		Description:         description,
+		ContextLength:       200000,
+		MaxCompletionTokens: 65536,
+	}
 }
 
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
@@ -296,6 +328,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "cursor":
+		return GetCursorModels()
 	default:
 		return nil
 	}
@@ -318,6 +352,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		data.Cursor,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

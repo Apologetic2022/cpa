@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package aiserver.v1;
+
+option go_package = "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/aiserver/v1;aiserverv1";
+
+message BidiRequestId {
+  string request_id = 1;
+}
+
+// Cursor's HTTP/1 bidirectional-stream fallback appends each client protobuf
+// message through this unary service.  ``data`` is lower-case hexadecimal in
+// the legacy path; ``data_binary`` is selected only when the desktop feature
+// gate ``bidi_append_binary_encoding`` is enabled.
+message BidiAppendRequest {
+  string data = 1;
+  BidiRequestId request_id = 2;
+  int64 append_seqno = 3;
+  bytes data_binary = 4;
+}
+
+message BidiAppendResponse {}
+
+message BidiPollRequest {
+  BidiRequestId request_id = 1;
+  optional bool start_request = 2;
+}
+
+message BidiPollResponse {
+  int64 seqno = 1;
+  string data = 2;
+  optional bool eof = 3;
+}
+
+service BidiService {
+  rpc BidiAppend(BidiAppendRequest) returns (BidiAppendResponse);
+}
+
+message CursorPosition {
+  int32 line = 1;
+  int32 column = 2;
+}
+
+message CursorRange {
+  CursorPosition start_position = 1;
+  CursorPosition end_position = 2;
+}
+
+message DetailedLine {
+  string text = 1;
+  float line_number = 2;
+  bool is_signature = 3;
+}
+
+message GitCommit {
+  string commit = 1;
+  string author = 2;
+  string date = 3;
+  string message = 4;
+}
+
+message FileGit {
+  repeated GitCommit commits = 1;
+}
+
+message CodeBlock {
+  message Signatures {
+    repeated CursorRange ranges = 1;
+  }
+
+  string relative_workspace_path = 1;
+  optional string file_contents = 2;
+  optional int32 file_contents_length = 9;
+  CursorRange range = 3;
+  string contents = 4;
+  Signatures signatures = 5;
+  optional string override_contents = 6;
+  optional string original_contents = 7;
+  repeated DetailedLine detailed_lines = 8;
+  FileGit file_git_context = 10;
+}
+
+message CodeResult {
+  CodeBlock code_block = 1;
+  float score = 2;
+}
+
+message FileDiff {
+  message Chunk {
+    string content = 1;
+    repeated string lines = 2;
+    int32 old_start = 3;
+    int32 old_lines = 4;
+    int32 new_start = 5;
+    int32 new_lines = 6;
+  }
+
+  int32 added = 4;
+  int32 removed = 5;
+  string from = 1;
+  string to = 2;
+  repeated Chunk chunks = 3;
+  optional string before_file_contents = 6;
+  optional string after_file_contents = 7;
+  optional bool is_generated = 8;
+}
+
+message GitDiff {
+  enum DiffType {
+    DIFF_TYPE_UNSPECIFIED = 0;
+    DIFF_TYPE_DIFF_TO_HEAD = 1;
+    DIFF_TYPE_DIFF_FROM_BRANCH_TO_MAIN = 2;
+  }
+
+  repeated FileDiff diffs = 1;
+  DiffType diff_type = 2;
+}
+
+message GetDiffRequest {
+  enum OutputFormat {
+    OUTPUT_FORMAT_UNSPECIFIED = 0;
+    OUTPUT_FORMAT_NAME_STATUS = 1;
+    OUTPUT_FORMAT_NAME_STATUS_AND_NUMSTAT = 2;
+    OUTPUT_FORMAT_FILE_DIFFS = 3;
+    OUTPUT_FORMAT_DIFFS_WITH_BEFORE_AND_AFTER = 4;
+  }
+
+  string cwd = 1;
+  string ref = 2;
+  string base_ref = 3;
+  bool merge_base = 4;
+  repeated string target_paths = 5;
+  optional int32 unified_context_lines = 6;
+  int32 max_untracked_files = 7;
+  int32 submodule_recurse_depth = 9;
+  bool include_space_changes = 10;
+  bool committed_only = 11;
+  bool compute_patch_id = 12;
+  optional bool return_head_sha = 13;
+  optional OutputFormat output_format = 8;
+}
+
+message GetDiffResponse {
+  message SubmoduleDiff {
+    string relative_path = 1;
+    GitDiff diff = 2;
+    bool errored = 3;
+  }
+
+  GitDiff diff = 1;
+  repeated SubmoduleDiff submodule_diffs = 2;
+  optional string patch_id = 3;
+  optional string head_sha = 4;
+  optional bool has_uncommitted_changes = 5;
+}

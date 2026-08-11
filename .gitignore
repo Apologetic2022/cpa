@@ -5,10 +5,14 @@ cli-proxy-api
 # Configuration
 config.yaml
 .env
+credentials.txt
 
 # Generated content
 bin/*
 logs/*
+run/*
+.release/*
+.tooling/*
 conv/*
 temp/*
 refs/*

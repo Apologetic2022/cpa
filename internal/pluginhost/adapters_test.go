@@ -2684,17 +2684,6 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		t.Fatal("stream chunks channel still open, want closed")
 	}
 
-	refreshed, errRefresh := adapter.Refresh(context.Background(), auth)
-	if errRefresh != nil {
-		t.Fatalf("Refresh() error = %v", errRefresh)
-	}
-	if refreshed == auth {
-		t.Fatal("Refresh() returned original auth pointer, want clone")
-	}
-	if refreshed.Metadata["token"] != "new" {
-		t.Fatalf("Refresh() metadata = %#v, want token=new", refreshed.Metadata)
-	}
-
 	count, errCountTokens := adapter.CountTokens(context.Background(), auth, req, opts)
 	if errCountTokens != nil {
 		t.Fatalf("CountTokens() error = %v", errCountTokens)

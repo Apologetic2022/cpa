@@ -316,6 +316,37 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Mode-B relay control plane (relay docs ch.6). In this fork the Claude provider has NO
+# direct Anthropic egress: tenant turns are admitted (custom system / custom tool
+# schemas / assistant prefill / json-mode / non-coding are rejected with a documented
+# 4xx), bound strictly 1 tenant : 1 account for life, gated by a fail-closed
+# ban/quarantine authority, rate-limited per account (concurrency=1, fixed seeded
+# budget at 25-35% of plan ceiling, timezone-derived quiet hours), then dispatched to
+# the account's REAL Claude Code agent over a local socket. The uTLS transport and the
+# credential refresh path are deleted from the fork (F3: the CC agent owns the OAuth
+# token lifecycle). Point each account at a relay/adapter (relay/adapter/adapter.mjs).
+# relay:
+#   agents:                        # auth-ID -> per-account agent endpoint (unix:// on Linux; loopback tcp:// dev-only)
+#     "claude-user@example.com.json": "unix:///run/relay/agent-claude.sock"
+#   store:                         # affinity + ban/quarantine authority (docs F8/F20, fail-closed)
+#     driver: "rqlite"             # "rqlite" (default, replicated Raft, linearizable reads) | "file" (dev/tests only)
+#     rqlite-url: "http://127.0.0.1:4001"
+#     path: ""                     # file driver only; default <auth-dir>/relay-store.json
+#   turn-timeout-seconds: 900      # hard per-turn wall-clock cap (F11)
+#   turn-max-output-tokens: 0      # per-turn output token cap, 0 = unlimited
+#   queue-depth: 8                 # bounded per-account FIFO; overflow = 429, never spills to another account
+#   admission:
+#     coding-gate: "strict"        # "strict" (default) rejects non-coding traffic; "off" disables the heuristic
+#     allow-tools: true            # tolerate exact-name default CC toolset schemas; custom schemas always rejected (docs 6.6.3)
+#   limits:
+#     plan-cap-5h: 220000          # assumed per-account 5h plan ceiling; enforced budget is a seeded 25-35% of this
+#     plan-cap-7d: 0               # 7d window cap; 0 disables
+#     opus-plan-cap-5h: 0          # separate Opus bucket cap; 0 routes Opus into the Sonnet bucket
+#     quiet-hours: true            # timezone-derived diurnal silence (no dispatch at local night)
+#     default-timezone: "UTC"
+#     account-timezone:            # per-account IANA timezone for quiet hours + pacing
+#       "claude-user@example.com.json": "America/Los_Angeles"
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;

@@ -121,6 +121,9 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
+	// Preserve fork-only / locally filled sections when remote omits them.
+	preserveLocalModelSections(oldData, parsed)
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -189,6 +192,17 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	return nil, ""
 }
 
+// preserveLocalModelSections keeps non-empty local provider lists when the
+// remote catalog ships an empty section (e.g. upstream has no "cursor" yet).
+func preserveLocalModelSections(oldData, newData *staticModelsJSON) {
+	if oldData == nil || newData == nil {
+		return
+	}
+	if len(newData.Cursor) == 0 && len(oldData.Cursor) > 0 {
+		newData.Cursor = oldData.Cursor
+	}
+}
+
 // detectChangedProviders compares two model catalogs and returns provider names
 // whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
 // under a single "codex" provider.
@@ -215,6 +229,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"cursor", oldData.Cursor, newData.Cursor},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -335,6 +350,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "cursor", models: data.Cursor},
 	}
 
 	for _, section := range requiredSections {

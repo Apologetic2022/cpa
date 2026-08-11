@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/relay"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
@@ -95,6 +96,12 @@ type Service struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// relayExecutor is the singleton Mode-B relay control-plane executor for the
+	// Claude provider (built once so per-account limiter/affinity state survives
+	// executor re-registrations).
+	relayExecutor *relay.Executor
+	relayMu       sync.Mutex
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
@@ -994,6 +1001,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"antigravity",
 		"kimi",
 		"xai",
+		"cursor",
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -1021,6 +1029,16 @@ func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace
 		}
 		s.registerExecutorForAuth(auth, forceReplace)
 	}
+}
+
+// relayExecutorSingleton returns the shared relay executor, building it on first use.
+func (s *Service) relayExecutorSingleton() *relay.Executor {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	if s.relayExecutor == nil {
+		s.relayExecutor = relay.NewExecutor(s.cfg)
+	}
+	return s.relayExecutor
 }
 
 func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
@@ -1078,11 +1096,17 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
-		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+		// Mode-B relay control plane (docs 6.6): this fork is a pure control plane —
+		// the Claude provider has NO direct Anthropic egress. The uTLS transport and
+		// the credential refresh path are deleted from the fork (F3); turns are
+		// dispatched to per-account real CC agents over local sockets.
+		s.coreManager.RegisterExecutor(s.relayExecutorSingleton())
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "cursor":
+		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1764,12 +1788,8 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.registerModelRefreshCallback()
 
-	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil && !homeEnabled {
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(context.Background(), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
+	// The auth auto-refresh path is deleted from this fork (relay docs 6.6.1/F3):
+	// the account's real CC agent owns the OAuth token lifecycle. No loop is started.
 
 	select {
 	case <-ctx.Done():
@@ -2027,6 +2047,13 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		if fetched := s.fetchCursorModelsForAuth(ctx, a); len(fetched) > 0 {
+			models = fetched
+		} else {
+			models = registry.GetCursorModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config

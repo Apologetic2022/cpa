@@ -430,14 +430,6 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
-// Refresh refreshes the authentication credentials (no-op for AI Studio).
-func (e *AIStudioExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
-		return refreshed, err
-	}
-	return auth, nil
-}
-
 type translatedPayload struct {
 	payload  []byte
 	action   string

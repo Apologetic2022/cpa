@@ -147,6 +147,11 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// Relay configures the Mode-B relay control plane for the Claude provider.
+	// When enabled, Claude traffic is dispatched to per-account real Claude Code
+	// agents over local sockets and the gateway never contacts Anthropic directly.
+	Relay RelayConfig `yaml:"relay" json:"relay"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 

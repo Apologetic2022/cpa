@@ -688,14 +688,6 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 }
 
-// Refresh refreshes the authentication credentials (no-op for Gemini API key).
-func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
-		return refreshed, err
-	}
-	return auth, nil
-}
-
 func geminiAPIKey(a *cliproxyauth.Auth) string {
 	if a == nil {
 		return ""

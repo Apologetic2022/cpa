@@ -2555,5 +2555,43 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "cursor": [
+    {
+      "id": "default",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Cursor Default",
+      "name": "default",
+      "description": "Cursor Agent default model selector.",
+      "context_length": 200000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "claude-4.6-sonnet",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "Claude 4.6 Sonnet",
+      "name": "claude-4.6-sonnet",
+      "description": "Cursor Agent Claude 4.6 Sonnet.",
+      "context_length": 200000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "cursor",
+      "type": "cursor",
+      "display_name": "GPT-5.4",
+      "name": "gpt-5.4",
+      "description": "Cursor Agent GPT-5.4.",
+      "context_length": 200000,
+      "max_completion_tokens": 65536
+    }
   ]
 }

@@ -1,0 +1,314 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/agent/v1;agentv1";
+
+import "google/protobuf/struct.proto";
+
+// Minimal Cursor Agent surface for streaming chat + client function tools.
+
+message UserMessage {
+  string text = 1;
+  string message_id = 2;
+}
+
+message UserMessageAction {
+  UserMessage user_message = 1;
+}
+
+message ResumeAction {}
+
+message ConversationAction {
+  oneof action {
+    UserMessageAction user_message_action = 1;
+    ResumeAction resume_action = 2;
+  }
+}
+
+message ConversationStateStructure {
+  repeated bytes root_prompt_messages_json = 1;
+  repeated bytes turns = 2;
+}
+
+message ModelDetails {
+  string model_id = 1;
+  string display_model_id = 3;
+  string display_name = 4;
+  string display_name_short = 5;
+  repeated string aliases = 6;
+  optional bool max_mode = 7;
+}
+
+message GetUsableModelsRequest {
+  repeated string custom_model_ids = 1;
+}
+
+message GetUsableModelsResponse {
+  repeated ModelDetails models = 1;
+}
+
+message RequestedModel {
+  message ModelParameterValue {
+    string id = 1;
+    // All parameters are encoded as strings.
+    string value = 2;
+  }
+
+  string model_id = 1;
+  bool max_mode = 2;
+  repeated ModelParameterValue parameters = 3;
+  bool built_in_model = 7;
+  bool is_variant_string_representation = 8;
+}
+
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  google.protobuf.Value input_schema = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+}
+
+message McpTools {
+  repeated McpToolDefinition mcp_tools = 1;
+}
+
+message AgentRunRequest {
+  ConversationStateStructure conversation_state = 1;
+  ConversationAction action = 2;
+  ModelDetails model_details = 3;
+  McpTools mcp_tools = 4;
+  optional string conversation_id = 5;
+  optional RequestedModel requested_model = 9;
+  optional bool exclude_workspace_context = 12;
+  optional bool client_supports_inline_images = 19;
+}
+
+message TextDeltaUpdate {
+  string text = 1;
+}
+
+message ThinkingDeltaUpdate {
+  string text = 1;
+}
+
+message TurnEndedUpdate {
+  optional int64 input_tokens = 1;
+  optional int64 output_tokens = 2;
+  optional int64 cache_read_tokens = 3;
+  optional int64 cache_write_tokens = 4;
+  optional int64 reasoning_tokens = 5;
+}
+
+message McpArgs {
+  string name = 1;
+  map<string, google.protobuf.Value> args = 2;
+  string tool_call_id = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+  bool smart_mode_approval_only = 7;
+  string server_identifier = 9;
+}
+
+message McpTextContent {
+  string text = 1;
+}
+
+message McpToolResultContentItem {
+  oneof content {
+    McpTextContent text = 1;
+  }
+}
+
+message McpSuccess {
+  repeated McpToolResultContentItem content = 1;
+  bool is_error = 2;
+}
+
+message McpError {
+  string error = 1;
+}
+
+message McpRejected {
+  string reason = 1;
+}
+
+message McpToolNotFound {
+  string name = 1;
+  repeated string available_tools = 2;
+}
+
+message McpResult {
+  oneof result {
+    McpSuccess success = 1;
+    McpError error = 2;
+    McpRejected rejected = 3;
+    McpToolNotFound tool_not_found = 5;
+  }
+}
+
+message McpToolCall {
+  McpArgs args = 1;
+}
+
+message ToolCall {
+  oneof tool {
+    McpToolCall mcp_tool_call = 15;
+  }
+  string tool_call_id = 57;
+}
+
+message ToolCallStartedUpdate {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  string model_call_id = 3;
+}
+
+message ToolCallCompletedUpdate {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  string model_call_id = 3;
+}
+
+message PartialToolCallUpdate {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  string args_text_delta = 3;
+  string model_call_id = 4;
+}
+
+message InteractionUpdate {
+  oneof message {
+    TextDeltaUpdate text_delta = 1;
+    ToolCallStartedUpdate tool_call_started = 2;
+    ToolCallCompletedUpdate tool_call_completed = 3;
+    ThinkingDeltaUpdate thinking_delta = 4;
+    PartialToolCallUpdate partial_tool_call = 7;
+    TurnEndedUpdate turn_ended = 14;
+  }
+}
+
+message ClientHeartbeat {}
+
+message GetBlobArgs {
+  bytes blob_id = 1;
+}
+
+message GetBlobResult {
+  optional bytes blob_data = 1;
+}
+
+message SetBlobArgs {
+  bytes blob_id = 1;
+  bytes blob_data = 2;
+}
+
+message SetBlobResult {}
+
+message KvServerMessage {
+  uint32 id = 1;
+  oneof message {
+    GetBlobArgs get_blob_args = 2;
+    SetBlobArgs set_blob_args = 3;
+  }
+}
+
+message KvClientMessage {
+  uint32 id = 1;
+  oneof message {
+    GetBlobResult get_blob_result = 2;
+    SetBlobResult set_blob_result = 3;
+  }
+}
+
+message RequestContextArgs {}
+
+message RequestContext {
+  repeated McpToolDefinition tools = 7;
+  optional bool web_search_enabled = 17;
+  optional bool web_fetch_enabled = 24;
+  optional bool supports_mcp_auth = 32;
+  optional bool git_repo_info_complete = 33;
+  optional bool read_lints_enabled = 35;
+  optional bool mcp_info_complete = 36;
+  optional bool rules_info_complete = 39;
+  optional bool env_info_complete = 40;
+  optional bool repository_info_complete = 41;
+  optional bool custom_subagents_info_complete = 42;
+  optional bool agent_skills_info_complete = 43;
+  optional bool mcp_file_system_info_complete = 44;
+  optional bool git_status_info_complete = 45;
+}
+
+message RequestContextSuccess {
+  RequestContext request_context = 1;
+}
+
+message RequestContextResult {
+  oneof result {
+    RequestContextSuccess success = 1;
+  }
+}
+
+message ExecServerMessage {
+  uint32 id = 1;
+  string exec_id = 15;
+  oneof message {
+    RequestContextArgs request_context_args = 10;
+    McpArgs mcp_args = 11;
+  }
+}
+
+message ExecClientMessage {
+  uint32 id = 1;
+  string exec_id = 15;
+  oneof message {
+    RequestContextResult request_context_result = 10;
+    McpResult mcp_result = 11;
+  }
+}
+
+message ExecClientStreamClose {
+  uint32 id = 1;
+}
+
+message ExecClientThrow {
+  uint32 id = 1;
+  string error = 2;
+  optional string error_code = 4;
+}
+
+message ExecClientControlMessage {
+  oneof message {
+    ExecClientStreamClose stream_close = 1;
+    ExecClientThrow throw = 2;
+  }
+}
+
+message AgentClientMessage {
+  oneof message {
+    AgentRunRequest run_request = 1;
+    ExecClientMessage exec_client_message = 2;
+    KvClientMessage kv_client_message = 3;
+    ExecClientControlMessage exec_client_control_message = 5;
+    ClientHeartbeat client_heartbeat = 7;
+  }
+}
+
+message AgentServerMetrics {
+  double metric_1 = 1;
+  double metric_2 = 2;
+  double metric_3 = 3;
+  double metric_4 = 4;
+}
+
+message AgentServerMessage {
+  oneof message {
+    InteractionUpdate interaction_update = 1;
+    ExecServerMessage exec_server_message = 2;
+    ConversationStateStructure conversation_checkpoint_update = 3;
+    KvServerMessage kv_server_message = 4;
+    AgentServerMetrics server_metrics = 8;
+  }
+}

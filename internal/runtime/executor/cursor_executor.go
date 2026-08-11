@@ -1,0 +1,545 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
+
+// CursorExecutor executes chat completions through Cursor's Agent Connect protocol.
+type CursorExecutor struct {
+	cfg *config.Config
+	svc *cursorauth.AuthService
+}
+
+// NewCursorExecutor creates a Cursor executor.
+func NewCursorExecutor(cfg *config.Config) *CursorExecutor {
+	return &CursorExecutor{cfg: cfg, svc: cursorauth.NewAuthService()}
+}
+
+// Identifier returns the executor identifier.
+func (e *CursorExecutor) Identifier() string { return "cursor" }
+
+// Execute performs a non-streaming Cursor Agent chat completion.
+func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	_ = originalPayloadSource
+
+	// Keep hyphen variant suffixes (-thinking/-xhigh/…) for Cursor resolution.
+	// Public wire model id is the base name; parameters ride on RequestedModel.
+	upstreamModel := strings.TrimPrefix(baseModel, "cursor-")
+	if upstreamModel == "" {
+		upstreamModel = "default"
+	}
+	resolved := cursorlib.ResolveRequestedModel(upstreamModel)
+	body, _ = sjson.SetBytes(body, "model", resolved.ModelID)
+
+	messages, err := extractChatMessages(body)
+	if err != nil {
+		return resp, err
+	}
+	tools := extractTools(body)
+
+	creds, err := e.ensureCredentials(ctx, auth)
+	if err != nil {
+		return resp, err
+	}
+
+	result, err := cursorlib.RunChat(ctx, creds, upstreamModel, messages, tools)
+	if err != nil {
+		return resp, err
+	}
+
+	outPayload := buildOpenAIChatCompletion(req.Model, result)
+	reporter.Publish(ctx, usage.Detail{
+		InputTokens:     result.InputTokens,
+		OutputTokens:    result.OutputTokens,
+		CachedTokens:    result.CacheReadTokens,
+		CacheReadTokens: result.CacheReadTokens,
+		ReasoningTokens: result.ReasoningTokens,
+		TotalTokens:     result.InputTokens + result.OutputTokens,
+	})
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, outPayload, &param)
+	resp = cliproxyexecutor.Response{Payload: out}
+	return resp, nil
+}
+
+// ExecuteStream streams OpenAI-compatible SSE chunks from Cursor Agent events.
+func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	to := sdktranslator.FromString("openai")
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+
+	upstreamModel := strings.TrimPrefix(baseModel, "cursor-")
+	if upstreamModel == "" {
+		upstreamModel = "default"
+	}
+	resolved := cursorlib.ResolveRequestedModel(upstreamModel)
+	body, _ = sjson.SetBytes(body, "model", resolved.ModelID)
+
+	messages, err := extractChatMessages(body)
+	if err != nil {
+		return nil, err
+	}
+	tools := extractTools(body)
+
+	creds, err := e.ensureCredentials(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
+
+	session, err := openCursorSession(ctx, creds, upstreamModel, messages, tools)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		completionID := "chatcmpl-" + uuid.NewString()
+		created := time.Now().Unix()
+		var param any
+		toolIndex := 0
+		finishReason := "stop"
+		var usageFinal cursorlib.StreamEvent
+
+		emitLine := func(line []byte) bool {
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, line, &param)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					_ = session.Close()
+					return false
+				}
+			}
+			return true
+		}
+
+		roleChunk, _ := json.Marshal(map[string]any{
+			"id":      completionID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}, "finish_reason": nil},
+			},
+		})
+		if !emitLine([]byte("data: " + string(roleChunk))) {
+			return
+		}
+
+		errIter := session.IterSegment(ctx, func(ev cursorlib.StreamEvent) error {
+			var delta map[string]any
+			switch ev.Type {
+			case "text_delta":
+				delta = map[string]any{"content": ev.Text}
+			case "thinking_delta":
+				delta = map[string]any{"reasoning_content": ev.Text}
+			case "tool_call":
+				if ev.ToolCall == nil {
+					return nil
+				}
+				args, _ := json.Marshal(ev.ToolCall.Arguments)
+				if args == nil {
+					args = []byte("{}")
+				}
+				delta = map[string]any{
+					"tool_calls": []map[string]any{
+						{
+							"index": toolIndex,
+							"id":    ev.ToolCall.ID,
+							"type":  "function",
+							"function": map[string]any{
+								"name":      ev.ToolCall.Name,
+								"arguments": string(args),
+							},
+						},
+					},
+				}
+				toolIndex++
+			case "usage_final":
+				usageFinal = ev
+				reporter.Publish(ctx, usage.Detail{
+					InputTokens:     ev.InputTokens,
+					OutputTokens:    ev.OutputTokens,
+					CachedTokens:    ev.CacheReadTokens,
+					CacheReadTokens: ev.CacheReadTokens,
+					ReasoningTokens: ev.ReasoningTokens,
+					TotalTokens:     ev.InputTokens + ev.OutputTokens,
+				})
+				return nil
+			case "error":
+				return fmt.Errorf("%s", ev.Message)
+			case "segment_end":
+				if ev.Reason != "" {
+					finishReason = ev.Reason
+				}
+				return nil
+			default:
+				return nil
+			}
+			if delta == nil {
+				return nil
+			}
+			chunk, _ := json.Marshal(map[string]any{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   req.Model,
+				"choices": []map[string]any{
+					{"index": 0, "delta": delta, "finish_reason": nil},
+				},
+			})
+			if !emitLine([]byte("data: " + string(chunk))) {
+				return context.Canceled
+			}
+			return nil
+		})
+		if errIter != nil {
+			reporter.PublishFailure(ctx, errIter)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errIter}:
+			case <-ctx.Done():
+			}
+			_ = session.Close()
+			return
+		}
+
+		if finishReason == "tool_calls" && toolIndex == 0 {
+			finishReason = "stop"
+		}
+		if finishReason != "tool_calls" {
+			_ = session.Close()
+		}
+
+		endChunk, _ := json.Marshal(map[string]any{
+			"id":      completionID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   req.Model,
+			"choices": []map[string]any{
+				{"index": 0, "delta": map[string]any{}, "finish_reason": finishReason},
+			},
+		})
+		if !emitLine([]byte("data: " + string(endChunk))) {
+			return
+		}
+		_ = usageFinal
+		doneChunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		for i := range doneChunks {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
+}
+
+func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, model string, messages []cursorlib.ChatMessage, tools []cursorlib.ToolDefinition) (*cursorlib.Session, error) {
+	results := trailingToolResults(messages)
+	if len(results) > 0 {
+		session, err := cursorlib.DefaultSessionManager().ResolveForToolResults(results)
+		if err != nil {
+			return nil, err
+		}
+		if err = session.SubmitToolResults(results); err != nil {
+			return nil, err
+		}
+		return session, nil
+	}
+	return cursorlib.StartSession(ctx, creds, model, messages, tools)
+}
+
+func trailingToolResults(messages []cursorlib.ChatMessage) []cursorlib.ToolResult {
+	start := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		switch messages[i].Role {
+		case "tool":
+			start = i
+			continue
+		case "assistant":
+			if len(messages[i].ToolCalls) > 0 && start >= 0 {
+				out := make([]cursorlib.ToolResult, 0, len(messages)-start)
+				for _, msg := range messages[start:] {
+					if msg.Role != "tool" || strings.TrimSpace(msg.ToolCallID) == "" {
+						continue
+					}
+					out = append(out, cursorlib.ToolResult{
+						ToolCallID: msg.ToolCallID,
+						Name:       msg.Name,
+						Content:    msg.Content,
+					})
+				}
+				return out
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// CountTokens returns a best-effort character-based estimate.
+func (e *CursorExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_ = ctx
+	_ = auth
+	_ = opts
+	chars := len(req.Payload)
+	tokens := chars / 4
+	if tokens < 1 {
+		tokens = 1
+	}
+	payload := fmt.Appendf(nil, `{"input_tokens":%d}`, tokens)
+	return cliproxyexecutor.Response{Payload: payload}, nil
+}
+
+// HttpRequest is unused for Cursor Agent protocol.
+func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	_ = ctx
+	_ = auth
+	_ = req
+	return nil, fmt.Errorf("cursor executor: HttpRequest is not supported for Agent Connect")
+}
+
+func (e *CursorExecutor) ensureCredentials(ctx context.Context, auth *cliproxyauth.Auth) (cursorlib.AccountCredentials, error) {
+	creds := cursorlib.CredentialsFromMetadata(authMetadata(auth))
+	if creds.AccessToken == "" {
+		return creds, fmt.Errorf("cursor: auth missing access_token")
+	}
+	storage := &cursorauth.TokenStorage{
+		AccessToken:  creds.AccessToken,
+		RefreshToken: creds.RefreshToken,
+		Expired:      stringFromMeta(authMetadata(auth), "expired"),
+	}
+	if !storage.NeedsRefresh() {
+		return creds, nil
+	}
+	refreshed, err := e.svc.RefreshToken(ctx, creds.RefreshToken, creds.AuthClientID, creds.BaseURL)
+	if err != nil {
+		log.Warnf("cursor token refresh failed, using existing token: %v", err)
+		return creds, nil
+	}
+	creds.AccessToken = refreshed.AccessToken
+	creds.RefreshToken = refreshed.RefreshToken
+	if auth != nil && auth.Metadata != nil {
+		auth.Metadata["access_token"] = refreshed.AccessToken
+		auth.Metadata["refresh_token"] = refreshed.RefreshToken
+		if !refreshed.ExpiresAt.IsZero() {
+			auth.Metadata["expired"] = refreshed.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	}
+	return creds, nil
+}
+
+func authMetadata(auth *cliproxyauth.Auth) map[string]any {
+	if auth == nil {
+		return nil
+	}
+	return auth.Metadata
+}
+
+func stringFromMeta(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	if v, ok := meta[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func extractChatMessages(body []byte) ([]cursorlib.ChatMessage, error) {
+	arr := gjson.GetBytes(body, "messages")
+	if !arr.IsArray() || len(arr.Array()) == 0 {
+		return nil, fmt.Errorf("cursor: request messages are required")
+	}
+	out := make([]cursorlib.ChatMessage, 0, len(arr.Array()))
+	for _, item := range arr.Array() {
+		role := item.Get("role").String()
+		content := item.Get("content")
+		text := ""
+		if content.IsArray() {
+			var parts []string
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "text" || part.Get("text").Exists() {
+					parts = append(parts, part.Get("text").String())
+				}
+			}
+			text = strings.Join(parts, "\n")
+		} else {
+			text = content.String()
+		}
+		if role == "" {
+			continue
+		}
+		msg := cursorlib.ChatMessage{
+			Role:       role,
+			Content:    text,
+			Name:       item.Get("name").String(),
+			ToolCallID: item.Get("tool_call_id").String(),
+		}
+		if toolCalls := item.Get("tool_calls"); toolCalls.IsArray() {
+			for _, tc := range toolCalls.Array() {
+				argsRaw := tc.Get("function.arguments").String()
+				var args map[string]any
+				if argsRaw != "" {
+					_ = json.Unmarshal([]byte(argsRaw), &args)
+				}
+				if args == nil {
+					args = map[string]any{}
+				}
+				msg.ToolCalls = append(msg.ToolCalls, cursorlib.ToolCall{
+					ID:        tc.Get("id").String(),
+					Name:      tc.Get("function.name").String(),
+					Arguments: args,
+				})
+			}
+		}
+		out = append(out, msg)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("cursor: no usable chat messages")
+	}
+	return out, nil
+}
+
+func extractTools(body []byte) []cursorlib.ToolDefinition {
+	arr := gjson.GetBytes(body, "tools")
+	if !arr.IsArray() {
+		return nil
+	}
+	out := make([]cursorlib.ToolDefinition, 0, len(arr.Array()))
+	for _, item := range arr.Array() {
+		typ := item.Get("type").String()
+		if typ != "" && typ != "function" {
+			continue
+		}
+		fn := item.Get("function")
+		name := fn.Get("name").String()
+		if name == "" {
+			name = item.Get("name").String()
+		}
+		if name == "" {
+			continue
+		}
+		var params map[string]any
+		paramsRaw := fn.Get("parameters").Raw
+		if paramsRaw == "" {
+			paramsRaw = item.Get("parameters").Raw
+		}
+		if paramsRaw != "" {
+			_ = json.Unmarshal([]byte(paramsRaw), &params)
+		}
+		desc := fn.Get("description").String()
+		if desc == "" {
+			desc = item.Get("description").String()
+		}
+		out = append(out, cursorlib.ToolDefinition{
+			Name:        name,
+			Description: desc,
+			Parameters:  params,
+		})
+	}
+	return out
+}
+
+func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byte {
+	id := "chatcmpl-" + uuid.NewString()
+	finish := result.FinishReason
+	if finish == "" {
+		finish = "stop"
+	}
+	message := map[string]any{
+		"role":    "assistant",
+		"content": result.Text,
+	}
+	if result.Thinking != "" {
+		message["reasoning_content"] = result.Thinking
+	}
+	if len(result.ToolCalls) > 0 {
+		calls := make([]map[string]any, 0, len(result.ToolCalls))
+		for _, tc := range result.ToolCalls {
+			args, _ := json.Marshal(tc.Arguments)
+			if args == nil {
+				args = []byte("{}")
+			}
+			calls = append(calls, map[string]any{
+				"id":   tc.ID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      tc.Name,
+					"arguments": string(args),
+				},
+			})
+		}
+		message["tool_calls"] = calls
+		if finish == "stop" {
+			finish = "tool_calls"
+		}
+	}
+	payload := map[string]any{
+		"id":      id,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"message":       message,
+				"finish_reason": finish,
+			},
+		},
+		"usage": map[string]any{
+			"prompt_tokens":     result.InputTokens,
+			"completion_tokens": result.OutputTokens,
+			"total_tokens":      result.InputTokens + result.OutputTokens,
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(`{"error":"marshal failed"}`)
+	}
+	return b
+}

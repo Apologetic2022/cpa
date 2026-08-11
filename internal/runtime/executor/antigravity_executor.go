@@ -1600,21 +1600,6 @@ attemptLoop:
 	return nil, err
 }
 
-// Refresh refreshes the authentication credentials using the refresh token.
-func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
-		return refreshed, err
-	}
-	if auth == nil {
-		return auth, nil
-	}
-	updated, errRefresh := e.refreshToken(ctx, auth.Clone())
-	if errRefresh != nil {
-		return nil, errRefresh
-	}
-	return updated, nil
-}
-
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
 	return antigravityProjectIDFromAuth(auth) == ""
 }

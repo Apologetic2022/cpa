@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package aiserver.v1;
+
+option go_package = "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/aiserver/v1;aiserverv1";
+
+import "agent/v1/agent_mvp.proto";
+
+// Slim AvailableModels surface for Cursor desktop 3.7.12.
+
+message AvailableModelsRequest {
+  bool is_nightly = 1;
+  bool include_long_context_models = 2;
+  bool exclude_max_named_models = 3;
+  repeated string additional_model_names = 4;
+  optional bool use_model_parameters = 5;
+  optional bool use_react_model_picker = 11;
+}
+
+message ModelParameterDefinition {
+  message ModelParameterType {
+    optional BooleanParameterDefinition boolean_parameter = 1;
+    optional EnumParameterDefinition enum_parameter = 2;
+  }
+
+  message BooleanParameterDefinition {
+    message BooleanParameterValue {
+      string value = 1;
+    }
+    repeated BooleanParameterValue values = 1;
+  }
+
+  message EnumParameterDefinition {
+    message EnumParameterValue {
+      string value = 1;
+    }
+    repeated EnumParameterValue values = 1;
+  }
+
+  string id = 1;
+  string name = 2;
+  ModelParameterType parameter_type = 4;
+}
+
+message AvailableModelsResponse {
+  message AvailableModel {
+    string name = 1;
+    optional bool supports_thinking = 9;
+    optional bool supports_images = 10;
+    optional string client_display_name = 17;
+    optional string server_model_name = 18;
+    optional bool supports_non_max_mode = 19;
+    repeated ModelParameterDefinition parameter_definitions = 29;
+    repeated ModelVariantConfig variants = 30;
+    repeated string id_aliases = 37;
+    optional int32 context_token_limit = 15;
+  }
+
+  message ModelVariantConfig {
+    repeated agent.v1.RequestedModel.ModelParameterValue parameter_values = 1;
+    string display_name = 2;
+    bool is_max_mode = 3;
+    optional bool is_default_non_max_config = 5;
+    optional string variant_string_representation = 9;
+    optional string legacy_slug = 11;
+  }
+
+  repeated string model_names = 1;
+  repeated AvailableModel models = 2;
+  bool use_model_parameters = 11;
+}

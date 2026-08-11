@@ -1394,13 +1394,6 @@ func (e *XAIAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
 
-func (e *XAIAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if e == nil || e.httpExec == nil {
-		return nil, fmt.Errorf("xai auto executor: http executor is nil")
-	}
-	return e.httpExec.Refresh(ctx, auth)
-}
-
 func (e *XAIAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e == nil || e.httpExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai auto executor: http executor is nil")
