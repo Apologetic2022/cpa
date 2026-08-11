@@ -17,14 +17,24 @@ const (
 	maxConnectMessage   = 32 * 1024 * 1024
 )
 
-// EncodeEnvelope builds one Connect envelope, compressing when useful.
+// EncodeEnvelope builds one Connect envelope without compressing the payload.
+//
+// Cursor Agent Run rejects compressed client envelopes unless the peer has
+// explicitly negotiated connect-content-encoding (desktop/cursor2api leave
+// outbound Agent frames uncompressed by default).
 func EncodeEnvelope(payload []byte, endStream bool) []byte {
+	return EncodeEnvelopeMaybeCompress(payload, endStream, false)
+}
+
+// EncodeEnvelopeMaybeCompress builds one Connect envelope, optionally gzip-
+// compressing payloads larger than connectGzipMinBytes.
+func EncodeEnvelopeMaybeCompress(payload []byte, endStream, compress bool) []byte {
 	flags := byte(0)
 	if endStream {
 		flags |= flagEndStream
 	}
 	body := payload
-	if !endStream && len(payload) > connectGzipMinBytes {
+	if compress && !endStream && len(payload) > connectGzipMinBytes {
 		var buf bytes.Buffer
 		zw, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
 		if err == nil {
@@ -41,6 +51,18 @@ func EncodeEnvelope(payload []byte, endStream bool) []byte {
 	binary.BigEndian.PutUint32(out[1:5], uint32(len(body)))
 	copy(out[5:], body)
 	return out
+}
+
+// SetCompression configures how compressed inbound envelopes are decoded.
+func (d *Decoder) SetCompression(encoding string) {
+	if d == nil {
+		return
+	}
+	encoding = stringsToLower(encoding)
+	if encoding == "" {
+		encoding = "gzip"
+	}
+	d.compression = encoding
 }
 
 // Envelope is one decoded Connect frame.

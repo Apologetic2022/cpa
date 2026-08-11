@@ -1,6 +1,9 @@
 package cursor
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestChecksumDeterministicPacking(t *testing.T) {
 	got := Checksum("abc", "def", 1_700_000_000_000)
@@ -19,6 +22,9 @@ func TestChecksumDeterministicPacking(t *testing.T) {
 func TestEncodeDecodeConnectEnvelope(t *testing.T) {
 	payload := []byte("hello-cursor")
 	frame := EncodeEnvelope(payload, false)
+	if frame[0]&flagCompressed != 0 {
+		t.Fatal("default EncodeEnvelope must not compress outbound frames")
+	}
 	dec := NewDecoder()
 	envs, err := dec.Feed(frame)
 	if err != nil {
@@ -29,5 +35,21 @@ func TestEncodeDecodeConnectEnvelope(t *testing.T) {
 	}
 	if string(envs[0].Payload) != string(payload) {
 		t.Fatalf("payload = %q", envs[0].Payload)
+	}
+}
+
+func TestEncodeEnvelopeMaybeCompressRoundTrip(t *testing.T) {
+	payload := bytes.Repeat([]byte("cursor-compress-"), 128) // > 1KiB
+	frame := EncodeEnvelopeMaybeCompress(payload, false, true)
+	if frame[0]&flagCompressed == 0 {
+		t.Fatal("expected compressed flag")
+	}
+	dec := NewDecoder()
+	envs, err := dec.Feed(frame)
+	if err != nil {
+		t.Fatalf("Feed() error: %v", err)
+	}
+	if len(envs) != 1 || string(envs[0].Payload) != string(payload) {
+		t.Fatalf("round-trip failed: len=%d", len(envs))
 	}
 }

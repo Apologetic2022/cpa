@@ -14,7 +14,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-const usableModelsPath = "/aiserver.v1.AiService/GetUsableModels"
+const (
+	usableModelsAiServicePath    = "/aiserver.v1.AiService/GetUsableModels"
+	usableModelsAgentServicePath = "/agent.v1.AgentService/GetUsableModels"
+)
 
 // CatalogModel is one account-visible Cursor model from AvailableModels.
 type CatalogModel struct {
@@ -102,18 +105,7 @@ func FetchAvailableModels(ctx context.Context, creds AccountCredentials) ([]Cata
 		creds.SessionID = uuid.NewString()
 	}
 
-	profile := ClientProfile{
-		Version:      creds.ClientVersion,
-		ClientType:   "ide",
-		ClientLayout: "editor",
-		GhostMode:    "false",
-		MachineID:    creds.MachineID,
-		MacMachineID: creds.MacMachineID,
-		Timezone:     creds.Timezone,
-		ClientOS:     creds.ClientOS,
-		ClientArch:   creds.ClientArch,
-		SessionID:    creds.SessionID,
-	}
+	profile := ProfileFromCredentials(creds)
 	requestID := uuid.NewString()
 	headers, err := profile.Headers(creds.AccessToken, requestID, "")
 	if err != nil {
@@ -133,11 +125,19 @@ func FetchAvailableModels(ctx context.Context, creds AccountCredentials) ([]Cata
 		UseReactModelPicker:      &usePicker,
 	}
 	resp := &aiserverv1.AvailableModelsResponse{}
-	if err = UnaryPOST(ctx, creds.BaseURL, availableModelsPath, headers, req, resp); err != nil {
+	respHdr, err := UnaryPOSTWithHeader(ctx, creds.BaseURL, availableModelsPath, headers, req, resp)
+	if err != nil {
 		return nil, err
 	}
+	if profile.CookieJar != nil {
+		profile.CookieJar.RememberResponse(creds.BaseURL, respHdr)
+		// Rebuild cookie header for follow-up usable-models calls.
+		if jarCookie := profile.CookieJar.Header(creds.BaseURL); jarCookie != "" {
+			headers["cookie"] = jarCookie
+		}
+	}
 	models := normalizeAvailableModels(resp)
-	if usable, errUsable := fetchUsableModels(ctx, creds.BaseURL, headers); errUsable == nil {
+	if usable, errUsable := fetchUsableModels(ctx, creds.BaseURL, headers, profile.CookieJar); errUsable == nil {
 		rememberUsableModels(usable)
 		attachWireIDs(models, usable)
 	}
@@ -151,25 +151,39 @@ type usableModel struct {
 	Aliases     []string
 }
 
-func fetchUsableModels(ctx context.Context, baseURL string, headers map[string]string) ([]usableModel, error) {
-	req := &agentv1.GetUsableModelsRequest{}
-	resp := &agentv1.GetUsableModelsResponse{}
-	if err := UnaryPOST(ctx, baseURL, usableModelsPath, headers, req, resp); err != nil {
-		return nil, err
-	}
-	out := make([]usableModel, 0, len(resp.GetModels()))
-	for _, model := range resp.GetModels() {
-		id := strings.TrimSpace(model.GetModelId())
-		if id == "" {
-			continue
+func fetchUsableModels(ctx context.Context, baseURL string, headers map[string]string, jar *CookieJar) ([]usableModel, error) {
+	paths := []string{usableModelsAiServicePath, usableModelsAgentServicePath}
+	var lastErr error
+	for i, path := range paths {
+		req := &agentv1.GetUsableModelsRequest{}
+		resp := &agentv1.GetUsableModelsResponse{}
+		respHdr, err := UnaryPOSTWithHeader(ctx, baseURL, path, headers, req, resp)
+		if err != nil {
+			lastErr = err
+			errText := err.Error()
+			if i == 0 && (strings.Contains(errText, "HTTP 404") || strings.Contains(errText, "HTTP 501")) {
+				continue
+			}
+			return nil, err
 		}
-		out = append(out, usableModel{
-			ID:          id,
-			DisplayName: strings.TrimSpace(model.GetDisplayName()),
-			Aliases:     append([]string(nil), model.GetAliases()...),
-		})
+		if jar != nil {
+			jar.RememberResponse(baseURL, respHdr)
+		}
+		out := make([]usableModel, 0, len(resp.GetModels()))
+		for _, model := range resp.GetModels() {
+			id := strings.TrimSpace(model.GetModelId())
+			if id == "" {
+				continue
+			}
+			out = append(out, usableModel{
+				ID:          id,
+				DisplayName: strings.TrimSpace(model.GetDisplayName()),
+				Aliases:     append([]string(nil), model.GetAliases()...),
+			})
+		}
+		return out, nil
 	}
-	return out, nil
+	return nil, lastErr
 }
 
 func attachWireIDs(models []CatalogModel, usable []usableModel) {

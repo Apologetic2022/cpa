@@ -120,7 +120,8 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 			}
 			return '-'
 		}, subject)
-		fileName = fmt.Sprintf("cursor-%s.json", safe)
+		// Lowercase keeps Windows auth IDs stable (file store lowercases on load).
+		fileName = fmt.Sprintf("cursor-%s.json", strings.ToLower(safe))
 	}
 	fmt.Println("\nCursor authentication successful!")
 

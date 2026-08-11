@@ -2,6 +2,8 @@ package cursor
 
 import (
 	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +40,71 @@ func TestBuildRunRequestIncludesMcpTools(t *testing.T) {
 	tool := run.GetMcpTools().GetMcpTools()[0]
 	if tool.GetProviderIdentifier() != MCPProviderIdentifier || tool.GetName() != "get_weather" {
 		t.Fatalf("unexpected tool: %#v", tool)
+	}
+}
+
+func TestBuildRunRequestNativeToolJSON(t *testing.T) {
+	msg, blobs, _, err := buildRunRequest("default", []ChatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "thinking", ToolCalls: []ToolCall{
+			{ID: "c1", Name: "get_weather", Arguments: map[string]any{"city": "NY"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Name: "get_weather", Content: `{"ok":true}`},
+		{Role: "user", Content: "again"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.GetRunRequest() == nil {
+		t.Fatal("missing run request")
+	}
+	var sawToolCall, sawToolResult bool
+	for _, data := range blobs {
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		role, _ := payload["role"].(string)
+		content, _ := payload["content"].([]any)
+		switch role {
+		case "assistant":
+			for _, part := range content {
+				m, _ := part.(map[string]any)
+				if m["type"] == "tool-call" && m["toolCallId"] == "c1" {
+					sawToolCall = true
+				}
+			}
+			if _, ok := payload["tool_calls"]; ok {
+				t.Fatalf("expected Cursor-native tool-call parts, not OpenAI tool_calls: %#v", payload)
+			}
+		case "tool":
+			if payload["id"] != "c1" {
+				continue
+			}
+			for _, part := range content {
+				m, _ := part.(map[string]any)
+				if m["type"] == "tool-result" && m["toolCallId"] == "c1" {
+					sawToolResult = true
+				}
+			}
+			if _, ok := payload["tool_call_id"]; ok {
+				t.Fatalf("expected Cursor-native tool id/content, not tool_call_id: %#v", payload)
+			}
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Fatalf("native tool history missing call=%v result=%v", sawToolCall, sawToolResult)
+	}
+}
+
+func TestCookieJarRemembersSetCookie(t *testing.T) {
+	jar := &CookieJar{byHost: map[string]map[string]string{}}
+	hdr := make(http.Header)
+	hdr.Add("Set-Cookie", "CursorCookie=server-issued; Path=/; HttpOnly")
+	jar.RememberResponse("https://api2.cursor.sh", hdr)
+	got := jar.Header("https://api2.cursor.sh")
+	if !strings.Contains(got, "CursorCookie=server-issued") {
+		t.Fatalf("expected server cookie, got %q", got)
 	}
 }
 

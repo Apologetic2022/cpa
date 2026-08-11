@@ -1,0 +1,34 @@
+#!/bin/sh
+# CI gate (docs 6.6.2): the depguard compile gate + relay invoke-path tests (incl. the
+# link/dependency sentinel) must pass before any push. Install:
+#   cp tools/hooks/pre-push .git/hooks/pre-push
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+GO_BIN="$(command -v go || command -v go.exe || true)"
+if [ -z "$GO_BIN" ] && [ -x "/c/Program Files/Go/bin/go.exe" ]; then
+  GO_BIN="/c/Program Files/Go/bin/go.exe"
+fi
+if [ -z "$GO_BIN" ]; then
+  echo "[gate] FATAL: go toolchain not found" >&2
+  exit 1
+fi
+
+LINT_BIN="$(command -v golangci-lint || command -v golangci-lint.exe || true)"
+if [ -z "$LINT_BIN" ] && [ -x "$HOME/go/bin/golangci-lint.exe" ]; then
+  LINT_BIN="$HOME/go/bin/golangci-lint.exe"
+fi
+if [ -z "$LINT_BIN" ]; then
+  echo "[gate] FATAL: golangci-lint not found (go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0)" >&2
+  exit 1
+fi
+
+echo "[gate] depguard (docs 6.6.2: egress stacks unreachable from invoke path)..."
+"$LINT_BIN" run ./internal/relay/...
+
+echo "[gate] relay invoke-path tests (incl. dependency-closure sentinel)..."
+"$GO_BIN" test ./internal/relay/...
+
+echo "[gate] OK"

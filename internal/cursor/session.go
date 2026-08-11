@@ -110,18 +110,7 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		return nil, err
 	}
 
-	profile := ClientProfile{
-		Version:      creds.ClientVersion,
-		ClientType:   "ide",
-		ClientLayout: "editor",
-		GhostMode:    "false",
-		MachineID:    creds.MachineID,
-		MacMachineID: creds.MacMachineID,
-		Timezone:     creds.Timezone,
-		ClientOS:     creds.ClientOS,
-		ClientArch:   creds.ClientArch,
-		SessionID:    creds.SessionID,
-	}
+	profile := ProfileFromCredentials(creds)
 	requestID := uuid.NewString()
 	headers, err := profile.Headers(creds.AccessToken, requestID, "")
 	if err != nil {
@@ -140,6 +129,9 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if profile.CookieJar != nil {
+		profile.CookieJar.RememberResponse(creds.BaseURL, stream.ResponseHeader())
 	}
 
 	session := &Session{
@@ -212,6 +204,13 @@ func (s *Session) heartbeatLoop(ctx context.Context) {
 func (s *Session) readLoop(ctx context.Context) {
 	defer close(s.events)
 	decoder := NewDecoder()
+	if s.stream != nil {
+		if enc := strings.TrimSpace(s.stream.ResponseHeader().Get("Connect-Content-Encoding")); enc != "" {
+			decoder.SetCompression(enc)
+		} else if enc := strings.TrimSpace(s.stream.ResponseHeader().Get("connect-content-encoding")); enc != "" {
+			decoder.SetCompression(enc)
+		}
+	}
 	readBuf := make([]byte, 32*1024)
 	for {
 		s.mu.Lock()
@@ -540,6 +539,16 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 		case *agentv1.InteractionUpdate_ThinkingDelta:
 			s.emit(StreamEvent{Type: "thinking_delta", Text: u.ThinkingDelta.GetText()})
 		case *agentv1.InteractionUpdate_TurnEnded:
+			// cursor2api: some transports emit turn_ended for the pre-tool
+			// segment before mcp_result is returned. Keep the bidi run open
+			// while client tools are still pending.
+			s.mu.Lock()
+			pendingCount := len(s.pending)
+			waiting := s.waitingTools
+			s.mu.Unlock()
+			if pendingCount > 0 || waiting {
+				return false, nil
+			}
 			ev := StreamEvent{Type: "usage_final"}
 			if u.TurnEnded.InputTokens != nil {
 				ev.InputTokens = *u.TurnEnded.InputTokens

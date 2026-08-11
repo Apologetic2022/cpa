@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -60,6 +61,29 @@ func DesktopMachineID() string {
 		}
 	}
 	return StableMachineID(seed)
+}
+
+// DesktopMacMachineID returns a hashed hardware MAC identity when available.
+// Matches cursor2api: multicast/synthetic adapters are skipped.
+func DesktopMacMachineID() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		hw := iface.HardwareAddr
+		if len(hw) < 6 {
+			continue
+		}
+		if hw[0]&0x01 != 0 {
+			continue // multicast / synthetic
+		}
+		return StableMachineID(hex.EncodeToString(hw[:6]))
+	}
+	return ""
 }
 
 func hostname() string {

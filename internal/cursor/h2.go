@@ -103,6 +103,14 @@ func OpenAgentRun(ctx context.Context, baseURL string, headers map[string]string
 // Status returns the HTTP status code.
 func (s *BidiStream) Status() int { return s.status }
 
+// ResponseHeader returns the response headers from the Agent Run open.
+func (s *BidiStream) ResponseHeader() http.Header {
+	if s == nil {
+		return nil
+	}
+	return s.hdr
+}
+
 // WriteEnvelope writes one Connect envelope to the request body.
 func (s *BidiStream) WriteEnvelope(payload []byte, endStream bool) error {
 	s.mu.Lock()

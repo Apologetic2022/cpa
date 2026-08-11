@@ -36,6 +36,8 @@ type AccountCredentials struct {
 	ClientArch    string
 	Timezone      string
 	Email         string
+	GhostMode     string
+	CookieJar     *CookieJar
 }
 
 // CredentialsFromMetadata extracts Cursor account fields from auth metadata.
@@ -66,6 +68,7 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 		ClientArch:    get("client_arch"),
 		Timezone:      get("timezone"),
 		Email:         get("email"),
+		GhostMode:     get("ghost_mode"),
 	}
 	if creds.BaseURL == "" {
 		creds.BaseURL = cursorauth.DefaultBaseURL
@@ -79,6 +82,9 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	if creds.MachineID == "" {
 		creds.MachineID = DesktopMachineID()
 	}
+	if creds.MacMachineID == "" {
+		creds.MacMachineID = DesktopMacMachineID()
+	}
 	if creds.ClientOS == "" {
 		creds.ClientOS = DesktopClientOS()
 	}
@@ -88,6 +94,14 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	if creds.SessionID == "" {
 		creds.SessionID = uuid.NewString()
 	}
+	if creds.GhostMode == "" {
+		creds.GhostMode = "implicit-false"
+	}
+	jarKey := creds.Email
+	if jarKey == "" {
+		jarKey = creds.MachineID
+	}
+	creds.CookieJar = CookieJarForAccount(jarKey)
 	return creds
 }
 
@@ -121,6 +135,8 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 		return nil, nil, "", fmt.Errorf("cursor: request has no user message")
 	}
 
+	// Track tool names so tool-result parts can include toolName (cursor2api).
+	toolNames := map[string]string{}
 	rootIDs := [][]byte{systemBlob}
 	for _, msg := range messages[:historyEnd] {
 		switch msg.Role {
@@ -138,37 +154,56 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 {
 				continue
 			}
-			payload := map[string]any{
-				"role": "assistant",
-				"content": []map[string]string{
-					{"type": "text", "text": msg.Content},
-				},
+			content := make([]map[string]any, 0, 1+len(msg.ToolCalls))
+			if strings.TrimSpace(msg.Content) != "" {
+				content = append(content, map[string]any{
+					"type": "text",
+					"text": msg.Content,
+				})
 			}
-			if len(msg.ToolCalls) > 0 {
-				calls := make([]map[string]any, 0, len(msg.ToolCalls))
-				for _, tc := range msg.ToolCalls {
-					args, _ := json.Marshal(tc.Arguments)
-					calls = append(calls, map[string]any{
-						"id":   tc.ID,
-						"type": "function",
-						"function": map[string]any{
-							"name":      tc.Name,
-							"arguments": string(args),
-						},
-					})
+			for _, tc := range msg.ToolCalls {
+				if strings.TrimSpace(tc.ID) != "" && strings.TrimSpace(tc.Name) != "" {
+					toolNames[tc.ID] = tc.Name
 				}
-				payload["tool_calls"] = calls
+				args := any(tc.Arguments)
+				if args == nil {
+					args = map[string]any{}
+				}
+				content = append(content, map[string]any{
+					"type":       "tool-call",
+					"toolCallId": tc.ID,
+					"toolName":   tc.Name,
+					"args":       args,
+				})
 			}
-			rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(payload)))
+			if len(content) == 0 {
+				continue
+			}
+			rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
+				"role":    "assistant",
+				"content": content,
+			})))
 		case "tool":
 			if strings.TrimSpace(msg.ToolCallID) == "" {
 				continue
 			}
+			toolName := strings.TrimSpace(msg.Name)
+			if toolName == "" {
+				toolName = toolNames[msg.ToolCallID]
+			}
+			resultPart := map[string]any{
+				"type":       "tool-result",
+				"toolName":   toolName,
+				"toolCallId": msg.ToolCallID,
+				"result":     msg.Content,
+				"toolKind":   "mcp",
+			}
 			rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
-				"role":         "tool",
-				"tool_call_id": msg.ToolCallID,
-				"name":         msg.Name,
-				"content":      msg.Content,
+				"role": "tool",
+				"id":   msg.ToolCallID,
+				"content": []map[string]any{
+					resultPart,
+				},
 			})))
 		case "system":
 			if strings.TrimSpace(msg.Content) == "" {

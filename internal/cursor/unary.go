@@ -21,22 +21,28 @@ const availableModelsPath = "/aiserver.v1.AiService/AvailableModels"
 
 // UnaryPOST performs a Cursor Connect unary RPC with raw application/proto body.
 func UnaryPOST(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) error {
+	_, err := UnaryPOSTWithHeader(ctx, baseURL, path, headers, req, resp)
+	return err
+}
+
+// UnaryPOSTWithHeader is UnaryPOST and also returns response headers (Set-Cookie).
+func UnaryPOSTWithHeader(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) (http.Header, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = "https://api2.cursor.sh"
 	}
 	u, err := url.Parse(baseURL + path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for k, v := range headers {
 		httpReq.Header.Set(k, v)
@@ -61,26 +67,26 @@ func UnaryPOST(ctx context.Context, baseURL, path string, headers map[string]str
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(httpResp.Body, 8<<20))
 	if err != nil {
-		return err
+		return httpResp.Header.Clone(), err
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return fmt.Errorf("cursor unary %s HTTP %d: %s", path, httpResp.StatusCode, truncateForErr(raw, 512))
+		return httpResp.Header.Clone(), fmt.Errorf("cursor unary %s HTTP %d: %s", path, httpResp.StatusCode, truncateForErr(raw, 512))
 	}
 
 	payload, err := decodeUnaryBody(raw, httpResp.Header)
 	if err != nil {
-		return err
+		return httpResp.Header.Clone(), err
 	}
 	if err = proto.Unmarshal(payload, resp); err != nil {
-		return fmt.Errorf("cursor unary decode %s: %w", path, err)
+		return httpResp.Header.Clone(), fmt.Errorf("cursor unary decode %s: %w", path, err)
 	}
-	return nil
+	return httpResp.Header.Clone(), nil
 }
 
 func decodeUnaryBody(raw []byte, hdr http.Header) ([]byte, error) {

@@ -25,9 +25,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -348,13 +350,24 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		return
 	}
 
-	// Try to find auth ID via authManager
+	// Try to find auth ID via authManager (case-insensitive: Windows paths
+	// lower-case IDs on load while OAuth saves may keep original casing).
 	var authID string
+	candidateIDs := make([]string, 0, 3)
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
+			if auth == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(auth.FileName), name) ||
+				strings.EqualFold(strings.TrimSpace(auth.ID), name) ||
+				strings.EqualFold(filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))), name) {
 				authID = auth.ID
+				candidateIDs = append(candidateIDs, auth.ID)
+				if fn := strings.TrimSpace(auth.FileName); fn != "" && !strings.EqualFold(fn, auth.ID) {
+					candidateIDs = append(candidateIDs, fn)
+				}
 				break
 			}
 		}
@@ -363,10 +376,26 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	if authID == "" {
 		authID = name // fallback to filename as ID
 	}
+	candidateIDs = append(candidateIDs, authID, name, strings.ToLower(name))
 
-	// Get models from registry
+	// Get models from registry; try case variants when IDs disagree on Windows.
 	reg := registry.GetGlobalRegistry()
-	models := reg.GetModelsForClient(authID)
+	var models []*registry.ModelInfo
+	seen := map[string]struct{}{}
+	for _, id := range candidateIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[strings.ToLower(id)]; ok {
+			continue
+		}
+		seen[strings.ToLower(id)] = struct{}{}
+		if got := reg.GetModelsForClient(id); len(got) > 0 {
+			models = got
+			break
+		}
+	}
 
 	result := make([]gin.H, 0, len(models))
 	for _, m := range models {
@@ -2578,6 +2607,142 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	}
 	c.JSON(200, response)
+}
+
+// RequestCursorToken starts Cursor deep-control PKCE login for the management UI.
+func (h *Handler) RequestCursorToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Cursor authentication...")
+
+	params, errParams := cursorauth.GenerateLoginParameters()
+	if errParams != nil {
+		log.Errorf("Failed to generate Cursor login parameters: %v", errParams)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	state := fmt.Sprintf("cur-%d", time.Now().UnixNano())
+	RegisterOAuthSession(state, "cursor")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "cursor")
+
+		fmt.Println("Waiting for Cursor authentication...")
+		svc := cursorauth.NewAuthService()
+		access, refresh, errWait := svc.WaitForLogin(pollCtx, params, time.Second)
+		if errWait != nil {
+			if !IsOAuthSessionPending(state, "cursor") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWait))
+			fmt.Printf("Cursor authentication failed: %v\n", errWait)
+			return
+		}
+		if !IsOAuthSessionPending(state, "cursor") {
+			return
+		}
+
+		machineID := cursorlib.DesktopMachineID()
+		macMachineID := cursorlib.DesktopMacMachineID()
+		sessionID := time.Now().UTC().Format("20060102150405")
+		subject := cursorauth.TokenUserID(access)
+		label := "Cursor User"
+		if subject != "" {
+			label = "Cursor-" + subject
+			if len(label) > 24 {
+				label = label[:24]
+			}
+		}
+		expired := cursorauth.TokenExpiry(access)
+		expiredStr := ""
+		if !expired.IsZero() {
+			expiredStr = expired.UTC().Format(time.RFC3339)
+		}
+
+		storage := &cursorauth.TokenStorage{
+			AccessToken:   access,
+			RefreshToken:  refresh,
+			TokenType:     "Bearer",
+			Expired:       expiredStr,
+			Type:          cursorauth.ProviderType,
+			BaseURL:       cursorauth.DefaultBaseURL,
+			ClientVersion: cursorauth.DefaultClientVersion,
+			AuthClientID:  cursorauth.DefaultAuthClientID,
+			MachineID:     machineID,
+			MacMachineID:  macMachineID,
+			SessionID:     sessionID,
+			ClientOS:      cursorlib.DesktopClientOS(),
+			ClientArch:    cursorlib.DesktopClientArch(),
+			Email:         subject,
+		}
+
+		metadata := map[string]any{
+			"type":           cursorauth.ProviderType,
+			"access_token":   access,
+			"refresh_token":  refresh,
+			"token_type":     "Bearer",
+			"base_url":       cursorauth.DefaultBaseURL,
+			"client_version": cursorauth.DefaultClientVersion,
+			"auth_client_id": cursorauth.DefaultAuthClientID,
+			"machine_id":     machineID,
+			"mac_machine_id": macMachineID,
+			"session_id":     sessionID,
+			"client_os":      cursorlib.DesktopClientOS(),
+			"client_arch":    cursorlib.DesktopClientArch(),
+			"ghost_mode":     "implicit-false",
+			"timestamp":      time.Now().UnixMilli(),
+		}
+		if expiredStr != "" {
+			metadata["expired"] = expiredStr
+		}
+		if subject != "" {
+			metadata["email"] = subject
+		}
+
+		fileName := fmt.Sprintf("cursor-%d.json", time.Now().UnixMilli())
+		if subject != "" {
+			safe := strings.Map(func(r rune) rune {
+				if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+					return r
+				}
+				return '-'
+			}, subject)
+			fileName = fmt.Sprintf("cursor-%s.json", strings.ToLower(safe))
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: cursorauth.ProviderType,
+			FileName: fileName,
+			Label:    label,
+			Storage:  storage,
+			Metadata: metadata,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "cursor"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Cursor authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Cursor authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"url":        params.LoginURL,
+		"state":      state,
+		"flow":       "device",
+		"expires_in": 600,
+	})
 }
 
 // watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.

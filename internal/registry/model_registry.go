@@ -787,7 +787,7 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	models, exists := r.clientModels[clientID]
+	models, exists := r.clientModels[r.resolveClientIDLocked(clientID)]
 	if !exists || len(models) == 0 {
 		return false
 	}
@@ -799,6 +799,24 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	return false
+}
+
+// resolveClientIDLocked returns an existing clientModels key that matches clientID,
+// using a case-insensitive fallback for Windows path/ID casing mismatches.
+func (r *ModelRegistry) resolveClientIDLocked(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return clientID
+	}
+	if _, ok := r.clientModels[clientID]; ok {
+		return clientID
+	}
+	for id := range r.clientModels {
+		if strings.EqualFold(id, clientID) {
+			return id
+		}
+	}
+	return clientID
 }
 
 // GetAvailableModels returns all models that have at least one available client
@@ -1347,13 +1365,14 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	modelIDs, exists := r.clientModels[clientID]
+	resolvedID := r.resolveClientIDLocked(clientID)
+	modelIDs, exists := r.clientModels[resolvedID]
 	if !exists || len(modelIDs) == 0 {
 		return nil
 	}
 
 	// Try to use client-specific model infos first
-	clientInfos := r.clientModelInfos[clientID]
+	clientInfos := r.clientModelInfos[resolvedID]
 
 	seen := make(map[string]struct{})
 	result := make([]*ModelInfo, 0, len(modelIDs))

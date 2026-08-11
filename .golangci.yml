@@ -1,0 +1,52 @@
+# CI gate (docs 6.6.2/T2): if any egress-capable stack becomes reachable from the
+# relay invoke path, the build must fail. The gateway is a pure control plane — the
+# account's real CC agent is the only component that may touch the Anthropic wire.
+# Second tripwire: internal/relay/sentinel_test.go (dependency-closure + AST checks).
+version: "2"
+linters:
+  default: none
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        # Invoke path core: no HTTP/TLS client stack at all. The only network
+        # conversations allowed are (a) the per-account local agent socket and
+        # (b) the host-local rqlited — both isolated in the two files below.
+        # executor.go references net/http TYPES only (provider interface plumbing);
+        # sentinel_test.go's AST check fails the build if it ever constructs a client.
+        relay-invoke-path:
+          files:
+            - "**/internal/relay/**"
+            - "!**/internal/relay/agentclient.go"
+            - "!**/internal/relay/store_rqlite.go"
+            - "!**/internal/relay/executor.go"
+            - "!**/internal/relay/*_test.go"
+          deny:
+            - pkg: "net/http"
+              desc: "invoke 路径禁止 net/http.Client —— 出口只能是 CC 自己的 Bun TLS（docs 6.6.2）"
+            - pkg: "crypto/tls"
+              desc: "invoke 路径禁止发起 TLS"
+            - pkg: "github.com/refraction-networking/utls"
+              desc: "uTLS 触 Anthropic 线路 = 致命，已从 fork 删除"
+        # The two socket-bearing files: local HTTP is their whole job, but TLS
+        # initiation stays banned (agent channel is plaintext HTTP/1.1 over UDS;
+        # rqlite path is plaintext host-local).
+        relay-socket-files:
+          files:
+            - "**/internal/relay/agentclient.go"
+            - "**/internal/relay/store_rqlite.go"
+          deny:
+            - pkg: "crypto/tls"
+              desc: "agent/rqlite 通道均为明文本地通道，禁止 TLS"
+            - pkg: "github.com/refraction-networking/utls"
+              desc: "uTLS 触 Anthropic 线路 = 致命，已从 fork 删除"
+        # executor.go: interface types only — no client/transport/server construction.
+        relay-executor-types-only:
+          files:
+            - "**/internal/relay/executor.go"
+          deny:
+            - pkg: "crypto/tls"
+              desc: "invoke 路径禁止发起 TLS"
+            - pkg: "github.com/refraction-networking/utls"
+              desc: "uTLS 触 Anthropic 线路 = 致命，已从 fork 删除"
