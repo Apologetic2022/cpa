@@ -14,7 +14,18 @@
 | `relay-adapter@.service` | 每账号 Claude Code 适配器（Node，Unix socket `/run/relay/agent-<account>.sock`） |
 | `relay-egress-guard.service` | netfilter 出口防护（网关 uid 禁止非回环出网） |
 | `rqlite-relay.service` | rqlite 亲和/封禁状态存储（127.0.0.1:4001） |
-| `nginx`（sites: `cli-proxy`, `cli-proxy-http`） | 80/443 反代到 127.0.0.1:8317，SSE 长连接 900s 超时 |
+| `nginx`（sites: `cli-proxy`, `cli-proxy-http`） | 80/443 反代到 127.0.0.1:8317，SSE 长连接 900s 超时，透传 `X-Forwarded-Proto` |
+
+## 生成图片的对外地址
+
+Cursor 生成的图片由网关自己托管在 `GET /cursor-images/<随机名>.png`（无需 API key，
+URL 本身即凭据，12 小时过期）。聊天回复里给出的是这个 URL，而不是 data URL——客户端的
+markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`，表现就是
+`[Image blocked: …]`。
+
+默认取自入站请求的 `Host` + `X-Forwarded-Proto`。本机 443 用的是自签证书，客户端的
+渲染引擎不信任它，因此 drop-in `cli-proxy-api.service.d/public-base-url.conf` 把地址
+固定到 `http://15.204.94.214`。换成受信任证书后删掉该 drop-in 即可。
 
 ## 目录对照
 
