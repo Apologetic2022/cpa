@@ -659,7 +659,7 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.handleToolCallCompleted(u.ToolCallCompleted)
 		case *agentv1.InteractionUpdate_ToolCallStarted:
 			if gen := u.ToolCallStarted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
-				log.Debugf("cursor genimage started: desc=%q path=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath())
+				log.Debugf("cursor genimage started: desc=%q path=%q refs=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath(), gen.GetArgs().GetReferenceImagePaths())
 			}
 		case *agentv1.InteractionUpdate_PartialToolCall:
 			// Client-visible tool calls are driven by Exec mcp_args for declared tools.
@@ -907,9 +907,9 @@ func (s *Session) handleWriteArgs(req *agentv1.ExecServerMessage, args *agentv1.
 func (s *Session) handleReadArgs(req *agentv1.ExecServerMessage, args *agentv1.ReadArgs) error {
 	path := strings.TrimSpace(args.GetPath())
 	data, ok := s.referenceImage(path)
+	log.Debugf("cursor read exec: path=%q served=%t bytes=%d", path, ok, len(data))
 	var result *agentv1.ReadResult
 	if !ok {
-		log.Debugf("cursor read exec: no reference image for path %q", path)
 		result = &agentv1.ReadResult{
 			Result: &agentv1.ReadResult_FileNotFound{
 				FileNotFound: &agentv1.ReadFileNotFound{Path: path},
@@ -1208,6 +1208,11 @@ func RunImageGeneration(ctx context.Context, creds AccountCredentials, model str
 	instruction := ImageGenerationInstruction(prompt)
 	if len(refs) > 0 {
 		instruction = ImageEditInstruction(prompt, refs)
+		paths := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			paths = append(paths, ref.Path)
+		}
+		log.Debugf("cursor image edit: advertising %d reference image(s): %q", len(refs), paths)
 	}
 	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: instruction}}, nil, WithReferenceImages(refs))
 	if err != nil {
