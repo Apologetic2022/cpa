@@ -119,11 +119,19 @@ func storeBlob(store map[string][]byte, data []byte) []byte {
 	return id
 }
 
-func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
+func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
 	model = selection.ModelID
 	blobStore := map[string][]byte{}
 	systemPrompt := "You are a helpful assistant."
+	if !allowImages {
+		// Cursor's server runs GenerateImage without waiting for the client
+		// in some flows, and its result is discarded on a conversation that
+		// may not generate. Saying so up front is what keeps the model from
+		// spending half a minute on an image nobody will receive and then
+		// reporting it as delivered.
+		systemPrompt += " You cannot generate images in this conversation: your image generation tool is unavailable. If the user asks for an image, say so plainly instead of calling the tool or claiming an image was produced."
+	}
 	systemBlob := storeBlob(blobStore, mustJSON(map[string]any{
 		"role":    "system",
 		"content": systemPrompt,
@@ -380,6 +388,54 @@ func headlessWorkspaceRoot() (root, project string) {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	return root, project
+}
+
+// referenceImageDir is the folder inside the headless project that reference
+// images are advertised under. Cursor only ever sees these paths through
+// GenerateImageArgs.reference_image_paths and reads them back over the read
+// exec, so the directory does not need to exist on disk.
+func referenceImageDir() string {
+	_, project := headlessWorkspaceRoot()
+	return filepath.Join(project, "assets", "references")
+}
+
+// ReferenceImagePath builds the workspace path advertised for the index-th
+// reference image of a run. The extension is derived from the MIME type so the
+// server can infer the format from the path alone.
+func ReferenceImagePath(index int, mimeType string) string {
+	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, imageExtension(mimeType)))
+}
+
+// headlessWorkspaceDirName is the folder the headless workspace and its Cursor
+// project are always named after. Paths carrying this segment came from this
+// client's own advertised environment and never exist on disk.
+const headlessWorkspaceDirName = "cliproxy-cursor-workspace"
+
+// IsHeadlessWorkspacePath reports whether a path points inside the workspace
+// this client advertises to Cursor. Such paths are what server-side tools echo
+// back (GenerateImage names its output there), and they never resolve on the
+// relay host, so callers must not surface them as if they were fetchable.
+func IsHeadlessWorkspacePath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return false
+	}
+	cleaned := filepath.Clean(p)
+	root, project := headlessWorkspaceRoot()
+	for _, base := range []string{root, project} {
+		if rel, err := filepath.Rel(base, cleaned); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	// The service account's home differs between deployments, so also accept
+	// the workspace folder name appearing anywhere in the path.
+	for _, segment := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		if segment == headlessWorkspaceDirName {
+			return true
+		}
+	}
+	return false
 }
 
 // writeHeadlessWorkspaceFile persists server-delivered file bytes (e.g. the

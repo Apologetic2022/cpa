@@ -2594,14 +2594,14 @@
       "max_completion_tokens": 65536
     },
     {
-      "id": "cursor-image",
+      "id": "nano-banana-pro",
       "object": "model",
       "created": 1740960000,
       "owned_by": "cursor",
       "type": "openai-image",
-      "display_name": "Cursor Generate Image",
-      "name": "cursor-image",
-      "description": "Cursor Agent image generation via the built-in GenerateImage tool."
+      "display_name": "Nano Banana Pro",
+      "name": "nano-banana-pro",
+      "description": "Image generation model. Upscales to 2K/4K when the prompt asks for it."
     }
   ]
 }

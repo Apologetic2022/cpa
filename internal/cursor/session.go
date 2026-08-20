@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +52,16 @@ type GeneratedImage struct {
 	MimeType string
 	// FilePath is the path the desktop client would have saved the image to.
 	FilePath string
+}
+
+// ReferenceImage is one caller-supplied input image for image-to-image
+// generation. Path is the workspace path advertised to Cursor through
+// GenerateImageArgs.reference_image_paths; Data holds the decoded bytes that
+// the read exec serves when the server fetches that path.
+type ReferenceImage struct {
+	Path     string
+	Data     []byte
+	MimeType string
 }
 
 // DataURL renders the image as an inline data URL.
@@ -96,6 +108,7 @@ type Session struct {
 	events       chan StreamEvent
 	errCh        chan error
 	closed       bool
+	finished     bool
 	waitingTools bool
 	pauseCh      chan struct{}
 	cancel       context.CancelFunc
@@ -106,6 +119,20 @@ type Session struct {
 	// file path. GenerateImage completions reference these when the completed
 	// tool call does not embed image_data itself.
 	writtenImages map[string][]byte
+
+	// referenceImages holds caller-supplied input images for image-to-image
+	// runs, keyed by the workspace path advertised to Cursor. Read execs are
+	// answered from this map because the headless client has no real
+	// workspace on disk. Seeded before the read loop starts and never mutated
+	// afterwards, so reads may outlive a single tool call.
+	referenceImages map[string][]byte
+
+	// allowImages opts this session into server-side image generation. It is
+	// off by default so a plain chat can never spend image quota: the Agent
+	// asks for approval before GenerateImage runs, and an unopted session
+	// rejects that request. Only the image model and the /v1/images endpoints
+	// turn it on.
+	allowImages bool
 }
 
 // ChatResult is the collected text response from one Agent segment / run.
@@ -125,13 +152,52 @@ type ChatResult struct {
 	ReasoningTokens  int64
 }
 
+// SessionOption customises a session before its read loop starts.
+type SessionOption func(*Session)
+
+// WithImageGeneration allows the Agent to run its built-in GenerateImage tool
+// on this session. Without it the approval request is rejected, so the model
+// falls back to a text answer instead of producing an image.
+func WithImageGeneration() SessionOption {
+	return func(s *Session) { s.allowImages = true }
+}
+
+// WithReferenceImages seeds the input images an image-to-image run serves back
+// over the read exec. It must be applied at construction time: Cursor can ask
+// for the bytes as soon as the run request is on the wire.
+func WithReferenceImages(refs []ReferenceImage) SessionOption {
+	return func(s *Session) {
+		if len(refs) == 0 {
+			return
+		}
+		s.referenceImages = make(map[string][]byte, len(refs))
+		for _, ref := range refs {
+			path := strings.TrimSpace(ref.Path)
+			if path == "" || len(ref.Data) == 0 {
+				continue
+			}
+			s.referenceImages[path] = ref.Data
+			// Best-effort only; the read exec answers from memory regardless.
+			writeHeadlessWorkspaceFile(path, ref.Data)
+		}
+	}
+}
+
 // StartSession opens a new Agent run for the given messages/tools.
-func StartSession(ctx context.Context, creds AccountCredentials, model string, messages []ChatMessage, tools []ToolDefinition) (*Session, error) {
+func StartSession(ctx context.Context, creds AccountCredentials, model string, messages []ChatMessage, tools []ToolDefinition, opts ...SessionOption) (*Session, error) {
 	if strings.TrimSpace(creds.AccessToken) == "" {
 		return nil, fmt.Errorf("cursor: access_token is required")
 	}
 	selection := ResolveRequestedModel(model)
-	clientMsg, blobStore, conversationID, err := buildRunRequest(model, messages, tools)
+	// Options are applied before the run request is built: whether the run may
+	// generate images decides what the Agent is told it can do.
+	session := &Session{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(session)
+		}
+	}
+	clientMsg, blobStore, conversationID, err := buildRunRequest(model, messages, tools, session.allowImages)
 	if err != nil {
 		return nil, err
 	}
@@ -164,22 +230,20 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		profile.CookieJar.RememberResponse(creds.BaseURL, stream.ResponseHeader())
 	}
 
-	session := &Session{
-		ID:             uuid.NewString(),
-		ConversationID: conversationID,
-		Model:          selection.ModelID,
-		stream:         stream,
-		blobStore:      blobStore,
-		tools:          append([]ToolDefinition(nil), tools...),
-		toolIndex:      indexTools(tools),
-		pending:        map[string]*pendingExec{},
-		events:         make(chan StreamEvent, 64),
-		errCh:          make(chan error, 1),
-		pauseCh:        make(chan struct{}),
-		cancel:         cancel,
-		lastActivity:   time.Now(),
-		manager:        DefaultSessionManager(),
-	}
+	session.ID = uuid.NewString()
+	session.ConversationID = conversationID
+	session.Model = selection.ModelID
+	session.stream = stream
+	session.blobStore = blobStore
+	session.tools = append([]ToolDefinition(nil), tools...)
+	session.toolIndex = indexTools(tools)
+	session.pending = map[string]*pendingExec{}
+	session.events = make(chan StreamEvent, 64)
+	session.errCh = make(chan error, 1)
+	session.pauseCh = make(chan struct{})
+	session.cancel = cancel
+	session.lastActivity = time.Now()
+	session.manager = DefaultSessionManager()
 	session.manager.Register(session)
 	go session.heartbeatLoop(runCtx)
 	go session.readLoop(runCtx)
@@ -293,8 +357,9 @@ func (s *Session) readLoop(ctx context.Context) {
 							return
 						}
 					}
+					s.markFinished()
 					s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-					_ = s.Close()
+					_ = s.closeWith("upstream_end_stream")
 					return
 				}
 				serverMsg := &agentv1.AgentServerMessage{}
@@ -317,8 +382,9 @@ func (s *Session) readLoop(ctx context.Context) {
 			}
 		}
 		if errRead == io.EOF {
+			s.markFinished()
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-			_ = s.Close()
+			_ = s.closeWith("upstream_eof")
 			return
 		}
 		if errRead != nil {
@@ -365,17 +431,36 @@ func (s *Session) emit(ev StreamEvent) {
 	}
 }
 
+// markFinished records that the turn delivered its terminal event. Tearing the
+// Agent stream down afterwards makes the in-flight read fail with "http2:
+// response body closed", and reporting that would turn a complete answer into
+// a failed one.
+func (s *Session) markFinished() {
+	s.mu.Lock()
+	s.finished = true
+	s.mu.Unlock()
+}
+
 func (s *Session) fail(err error) {
 	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	finished := s.finished
+	s.mu.Unlock()
+	if finished {
+		log.Debugf("cursor session torn down after a finished turn: id=%s err=%v", s.ID, err)
+		_ = s.closeWith("teardown")
 		return
 	}
 	select {
 	case s.errCh <- err:
 	default:
 	}
+	log.Debugf("cursor session failed: id=%s err=%v", s.ID, err)
 	s.emit(StreamEvent{Type: "error", Message: err.Error()})
 	s.emit(StreamEvent{Type: "segment_end", Reason: "error"})
-	_ = s.Close()
+	_ = s.closeWith("stream_error")
 }
 
 // Events returns the live event stream for the current segment consumer.
@@ -393,7 +478,7 @@ func (s *Session) CollectSegment(ctx context.Context) (*ChatResult, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Close()
+			_ = s.closeWith("collect_ctx_done")
 			return nil, ctx.Err()
 		case err := <-s.errCh:
 			if err != nil {
@@ -449,7 +534,7 @@ func (s *Session) IterSegment(ctx context.Context, fn func(StreamEvent) error) e
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Close()
+			_ = s.closeWith("iter_ctx_done")
 			return ctx.Err()
 		case err := <-s.errCh:
 			if err != nil {
@@ -480,14 +565,14 @@ func (s *Session) SubmitToolResults(results []ToolResult) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("cursor: session closed")
+		return fmt.Errorf("%w (session closed)", ErrToolSessionLost)
 	}
 	pending := make([]*pendingExec, 0, len(results))
 	for _, result := range results {
-		item, ok := s.pending[result.ToolCallID]
+		item, ok := s.pending[NormalizeToolCallID(result.ToolCallID)]
 		if !ok {
 			s.mu.Unlock()
-			return fmt.Errorf("cursor: no pending tool call %s", result.ToolCallID)
+			return fmt.Errorf("%w (no pending tool call %s)", ErrToolSessionLost, result.ToolCallID)
 		}
 		pending = append(pending, item)
 	}
@@ -498,11 +583,12 @@ func (s *Session) SubmitToolResults(results []ToolResult) error {
 		if err := s.sendMcpResult(item.request, result); err != nil {
 			return err
 		}
+		key := NormalizeToolCallID(result.ToolCallID)
 		s.mu.Lock()
-		delete(s.pending, result.ToolCallID)
+		delete(s.pending, key)
 		s.mu.Unlock()
 		if s.manager != nil {
-			s.manager.UnbindPending(result.ToolCallID)
+			s.manager.UnbindPending(key)
 		}
 	}
 	s.resumeReading()
@@ -545,16 +631,23 @@ func (s *Session) sendMcpResult(req *agentv1.ExecServerMessage, result ToolResul
 }
 
 // Close tears down the Agent stream.
-func (s *Session) Close() error {
+func (s *Session) Close() error { return s.closeWith("explicit") }
+
+// closeWith records why a session ended. Tool round-trips span several client
+// requests, so a premature close only shows up later as an unknown
+// tool_call_id; the reason is the only way to tell those cases apart.
+func (s *Session) closeWith(reason string) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	pending := len(s.pending)
 	stream := s.stream
 	cancel := s.cancel
 	s.mu.Unlock()
+	log.Debugf("cursor session close: id=%s reason=%s pending_tools=%d", s.ID, reason, pending)
 	if cancel != nil {
 		cancel()
 	}
@@ -603,8 +696,9 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 				ev.ReasoningTokens = *u.TurnEnded.ReasoningTokens
 			}
 			s.emit(ev)
+			s.markFinished()
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-			go func() { _ = s.Close() }()
+			go func() { _ = s.closeWith("turn_ended") }()
 		case *agentv1.InteractionUpdate_ToolCallCompleted:
 			if gen := u.ToolCallCompleted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
 				log.Debugf("cursor genimage completed: result=%T err=%q", gen.GetResult().GetResult(), gen.GetResult().GetError().GetError())
@@ -612,7 +706,7 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.handleToolCallCompleted(u.ToolCallCompleted)
 		case *agentv1.InteractionUpdate_ToolCallStarted:
 			if gen := u.ToolCallStarted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
-				log.Debugf("cursor genimage started: desc=%q path=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath())
+				log.Debugf("cursor genimage started: desc=%q path=%q refs=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath(), gen.GetArgs().GetReferenceImagePaths())
 			}
 		case *agentv1.InteractionUpdate_PartialToolCall:
 			// Client-visible tool calls are driven by Exec mcp_args for declared tools.
@@ -641,6 +735,14 @@ func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdat
 	}
 	gen := update.GetToolCall().GetGenerateImageToolCall()
 	if gen == nil {
+		return
+	}
+	if !s.allowImages {
+		// Cursor's server runs the tool without waiting for approval in some
+		// flows, so the image still has to be dropped here. Report the
+		// attempt: the model tends to announce an image it never delivered,
+		// and silence would leave the caller waiting for it.
+		s.emit(StreamEvent{Type: "image", Message: ImageGenerationRejectedReason})
 		return
 	}
 	result := gen.GetResult()
@@ -693,10 +795,11 @@ func (s *Session) emitRawImage(raw []byte, filePath string) {
 }
 
 // handleInteractionQuery auto-approves GenerateImage requests so headless
-// clients never stall on the desktop approval dialog. Other query variants
+// clients never stall on the desktop approval dialog. Sessions that were not
+// opened for image generation reject the request instead. Other query variants
 // are not decoded by the MVP proto and stay unanswered.
 func (s *Session) handleInteractionQuery(query *agentv1.InteractionQuery) error {
-	client := buildGenerateImageApproval(query)
+	client := buildGenerateImageDecision(query, s.allowImages)
 	if client == nil {
 		return nil
 	}
@@ -707,9 +810,14 @@ func (s *Session) handleInteractionQuery(query *agentv1.InteractionQuery) error 
 	return s.stream.WriteEnvelope(payload, false)
 }
 
-// buildGenerateImageApproval returns the approval reply for a GenerateImage
-// interaction query, or nil when the query is not an image generation request.
-func buildGenerateImageApproval(query *agentv1.InteractionQuery) *agentv1.AgentClientMessage {
+// ImageGenerationRejectedReason is handed back to the Agent when a session
+// that is not an image session asks to run GenerateImage.
+const ImageGenerationRejectedReason = "Image generation is not available in this conversation. Use the dedicated image model instead."
+
+// buildGenerateImageDecision returns the approval or rejection reply for a
+// GenerateImage interaction query, or nil when the query is not an image
+// generation request.
+func buildGenerateImageDecision(query *agentv1.InteractionQuery, allow bool) *agentv1.AgentClientMessage {
 	if query == nil {
 		return nil
 	}
@@ -717,16 +825,24 @@ func buildGenerateImageApproval(query *agentv1.InteractionQuery) *agentv1.AgentC
 	if gen == nil {
 		return nil
 	}
+	decision := &agentv1.GenerateImageRequestResponse{}
+	if allow {
+		decision.Result = &agentv1.GenerateImageRequestResponse_Approved_{
+			Approved: &agentv1.GenerateImageRequestResponse_Approved{
+				Description: gen.GetArgs().GetDescription(),
+			},
+		}
+	} else {
+		decision.Result = &agentv1.GenerateImageRequestResponse_Rejected_{
+			Rejected: &agentv1.GenerateImageRequestResponse_Rejected{
+				Reason: ImageGenerationRejectedReason,
+			},
+		}
+	}
 	resp := &agentv1.InteractionResponse{
 		Id: query.GetId(),
 		Result: &agentv1.InteractionResponse_GenerateImageRequestResponse{
-			GenerateImageRequestResponse: &agentv1.GenerateImageRequestResponse{
-				Result: &agentv1.GenerateImageRequestResponse_Approved_{
-					Approved: &agentv1.GenerateImageRequestResponse_Approved{
-						Description: gen.GetArgs().GetDescription(),
-					},
-				},
-			},
+			GenerateImageRequestResponse: decision,
 		},
 	}
 	return &agentv1.AgentClientMessage{
@@ -763,6 +879,8 @@ func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
 		return false, sendExecStreamClose(s.stream, req.Id)
 	case *agentv1.ExecServerMessage_WriteArgs:
 		return false, s.handleWriteArgs(req, m.WriteArgs)
+	case *agentv1.ExecServerMessage_ReadArgs:
+		return false, s.handleReadArgs(req, m.ReadArgs)
 	case *agentv1.ExecServerMessage_RequestContextArgs:
 		result := &agentv1.RequestContextResult{
 			Result: &agentv1.RequestContextResult_Success{
@@ -851,6 +969,70 @@ func (s *Session) handleWriteArgs(req *agentv1.ExecServerMessage, args *agentv1.
 	return sendExecStreamClose(s.stream, req.Id)
 }
 
+// handleReadArgs services the read exec Cursor issues to pull a client-side
+// file. Only the reference images seeded for this run are readable: the
+// headless client has no workspace on disk, and answering arbitrary paths from
+// the proxy host's filesystem would expose it to the upstream.
+func (s *Session) handleReadArgs(req *agentv1.ExecServerMessage, args *agentv1.ReadArgs) error {
+	path := strings.TrimSpace(args.GetPath())
+	data, ok := s.referenceImage(path)
+	log.Debugf("cursor read exec: path=%q served=%t bytes=%d", path, ok, len(data))
+	var result *agentv1.ReadResult
+	if !ok {
+		result = &agentv1.ReadResult{
+			Result: &agentv1.ReadResult_FileNotFound{
+				FileNotFound: &agentv1.ReadFileNotFound{Path: path},
+			},
+		}
+	} else {
+		result = &agentv1.ReadResult{
+			Result: &agentv1.ReadResult_Success{
+				Success: &agentv1.ReadSuccess{
+					Path:     path,
+					FileSize: int64(len(data)),
+					Output:   &agentv1.ReadSuccess_Data{Data: data},
+				},
+			},
+		}
+	}
+	execClient := &agentv1.ExecClientMessage{
+		Id:      req.Id,
+		ExecId:  req.ExecId,
+		Message: &agentv1.ExecClientMessage_ReadResult{ReadResult: result},
+	}
+	client := &agentv1.AgentClientMessage{
+		Message: &agentv1.AgentClientMessage_ExecClientMessage{ExecClientMessage: execClient},
+	}
+	payload, err := proto.Marshal(client)
+	if err != nil {
+		return err
+	}
+	if err = s.stream.WriteEnvelope(payload, false); err != nil {
+		return err
+	}
+	return sendExecStreamClose(s.stream, req.Id)
+}
+
+// referenceImage looks up seeded reference bytes. Cursor sometimes normalises
+// the advertised path, so an exact miss falls back to a basename match.
+func (s *Session) referenceImage(path string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.referenceImages) == 0 {
+		return nil, false
+	}
+	if data, ok := s.referenceImages[path]; ok {
+		return data, true
+	}
+	base := filepath.Base(path)
+	for p, data := range s.referenceImages {
+		if filepath.Base(p) == base {
+			return data, true
+		}
+	}
+	return nil, false
+}
+
 // takeWrittenImage removes and returns stashed write_args image bytes. An
 // empty path returns any stashed image (single-image runs do not always echo
 // the exact path back on completion).
@@ -894,7 +1076,7 @@ func (s *Session) handleMcpArgs(req *agentv1.ExecServerMessage, args *agentv1.Mc
 		}
 		return false, s.replyMcp(req, result)
 	}
-	callID := strings.TrimSpace(args.GetToolCallId())
+	callID := NormalizeToolCallID(args.GetToolCallId())
 	if callID == "" {
 		callID = uuid.NewString()
 	}
@@ -910,6 +1092,7 @@ func (s *Session) handleMcpArgs(req *agentv1.ExecServerMessage, args *agentv1.Mc
 	if s.manager != nil {
 		s.manager.BindPending(callID, s)
 	}
+	log.Debugf("cursor client tool call: session=%s tool=%s call_id=%s", s.ID, def.Name, callID)
 	s.emit(StreamEvent{Type: "tool_call", ToolCall: &call})
 	return true, nil
 }
@@ -1016,19 +1199,24 @@ func buildMcpToolDefinitions(tools []ToolDefinition) []*agentv1.McpToolDefinitio
 }
 
 // RunChat performs a text/tool Cursor Agent segment and returns the collected result.
-func RunChat(ctx context.Context, creds AccountCredentials, model string, messages []ChatMessage, tools []ToolDefinition) (*ChatResult, error) {
+func RunChat(ctx context.Context, creds AccountCredentials, model string, messages []ChatMessage, tools []ToolDefinition, opts ...SessionOption) (*ChatResult, error) {
 	results := extractToolResults(messages)
 	if len(results) > 0 {
 		session, err := DefaultSessionManager().ResolveForToolResults(results)
-		if err != nil {
+		if err == nil {
+			err = session.SubmitToolResults(results)
+		}
+		switch {
+		case err == nil:
+			return session.CollectSegment(ctx)
+		case errors.Is(err, ErrToolSessionLost):
+			log.Debugf("cursor: replaying conversation after lost tool session: %v", err)
+			messages = ReplayMessagesForLostSession(messages, results)
+		default:
 			return nil, err
 		}
-		if err = session.SubmitToolResults(results); err != nil {
-			return nil, err
-		}
-		return session.CollectSegment(ctx)
 	}
-	session, err := StartSession(ctx, creds, model, messages, tools)
+	session, err := StartSession(ctx, creds, model, messages, tools, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1054,10 +1242,61 @@ func ImageGenerationInstruction(prompt string) string {
 		"Do not ask clarifying questions and do not write code.\n\nDescription: " + strings.TrimSpace(prompt)
 }
 
+// ImageEditInstruction steers the Agent model into an image-to-image call. The
+// reference paths must be named explicitly: the model decides what to put in
+// GenerateImageArgs.reference_image_paths, and the server only reads paths it
+// was given there.
+func ImageEditInstruction(prompt string, refs []ReferenceImage) string {
+	paths := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if path := strings.TrimSpace(ref.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return ImageGenerationInstruction(prompt)
+	}
+	noun := "image"
+	if len(paths) > 1 {
+		noun = "images"
+	}
+	return "Use your image generation tool to edit the existing " + noun + " listed below and produce exactly one new image, then stop. " +
+		"Pass every listed path as a reference image to the tool. " +
+		"Do not ask clarifying questions and do not write code.\n\nReference " + noun + ":\n" +
+		"- " + strings.Join(paths, "\n- ") +
+		"\n\nRequested change: " + strings.TrimSpace(prompt)
+}
+
+// AttachedImageNote names the caller's inline images for a general chat turn.
+// The Agent run request carries text only, so an attachment cannot ride along
+// with the message: it is materialised at a workspace path whose bytes the read
+// exec serves, and the model is told where to find it. Without the paths spelled
+// out the model reports there is no image in the workspace and gives up.
+func AttachedImageNote(refs []ReferenceImage) string {
+	paths := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if path := strings.TrimSpace(ref.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	noun := "image"
+	if len(paths) > 1 {
+		noun = "images"
+	}
+	return "\n\n[Attached " + noun + "]\nThe user attached the following " + noun +
+		" to this message; they are saved in the workspace at:\n- " + strings.Join(paths, "\n- ") +
+		"\nRead those paths when the request concerns them. Image generation is unavailable in this conversation, so answer with text."
+}
+
 // RunImageGeneration drives one Cursor Agent run whose sole purpose is to
 // produce images via the built-in GenerateImage tool. Cursor's server renders
-// the image after the client auto-approves the interaction query.
-func RunImageGeneration(ctx context.Context, creds AccountCredentials, model string, prompt string) (*ChatResult, error) {
+// the image after the client auto-approves the interaction query. When refs is
+// non-empty the run is an image-to-image edit: the paths are advertised to the
+// model and their bytes are served back over the read exec.
+func RunImageGeneration(ctx context.Context, creds AccountCredentials, model string, prompt string, refs ...ReferenceImage) (*ChatResult, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("cursor: image prompt is required")
@@ -1065,7 +1304,16 @@ func RunImageGeneration(ctx context.Context, creds AccountCredentials, model str
 	if strings.TrimSpace(model) == "" {
 		model = ImageGenerationAgentModel
 	}
-	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: ImageGenerationInstruction(prompt)}}, nil)
+	instruction := ImageGenerationInstruction(prompt)
+	if len(refs) > 0 {
+		instruction = ImageEditInstruction(prompt, refs)
+		paths := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			paths = append(paths, ref.Path)
+		}
+		log.Debugf("cursor image edit: advertising %d reference image(s): %q", len(refs), paths)
+	}
+	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: instruction}}, nil, WithImageGeneration(), WithReferenceImages(refs))
 	if err != nil {
 		return nil, err
 	}

@@ -3454,6 +3454,405 @@ func (*WriteResult_Success) isWriteResult_Result() {}
 
 func (*WriteResult_Error) isWriteResult_Result() {}
 
+// Read exec surface. Cursor's server pulls client-side files through this exec
+// when a tool needs their bytes; GenerateImage uses it to fetch every path
+// listed in reference_image_paths. The headless client has no real workspace on
+// disk, so reads are answered from the reference images held in memory for the
+// run. Field numbers match the full agent.proto ReadArgs/ReadResult.
+type ReadArgs struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	ToolCallId    string                 `protobuf:"bytes,2,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	Offset        *int32                 `protobuf:"varint,4,opt,name=offset,proto3,oneof" json:"offset,omitempty"`
+	Limit         *uint32                `protobuf:"varint,5,opt,name=limit,proto3,oneof" json:"limit,omitempty"`
+	EncodingHint  *string                `protobuf:"bytes,6,opt,name=encoding_hint,json=encodingHint,proto3,oneof" json:"encoding_hint,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadArgs) Reset() {
+	*x = ReadArgs{}
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadArgs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadArgs) ProtoMessage() {}
+
+func (x *ReadArgs) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadArgs.ProtoReflect.Descriptor instead.
+func (*ReadArgs) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *ReadArgs) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReadArgs) GetToolCallId() string {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return ""
+}
+
+func (x *ReadArgs) GetOffset() int32 {
+	if x != nil && x.Offset != nil {
+		return *x.Offset
+	}
+	return 0
+}
+
+func (x *ReadArgs) GetLimit() uint32 {
+	if x != nil && x.Limit != nil {
+		return *x.Limit
+	}
+	return 0
+}
+
+func (x *ReadArgs) GetEncodingHint() string {
+	if x != nil && x.EncodingHint != nil {
+		return *x.EncodingHint
+	}
+	return ""
+}
+
+type ReadSuccess struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Path       string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	TotalLines int32                  `protobuf:"varint,3,opt,name=total_lines,json=totalLines,proto3" json:"total_lines,omitempty"`
+	FileSize   int64                  `protobuf:"varint,4,opt,name=file_size,json=fileSize,proto3" json:"file_size,omitempty"`
+	Truncated  bool                   `protobuf:"varint,6,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	// Binary reads use data; content stays for text files.
+	//
+	// Types that are valid to be assigned to Output:
+	//
+	//	*ReadSuccess_Content
+	//	*ReadSuccess_Data
+	Output        isReadSuccess_Output `protobuf_oneof:"output"`
+	RangeApplied  bool                 `protobuf:"varint,8,opt,name=range_applied,json=rangeApplied,proto3" json:"range_applied,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadSuccess) Reset() {
+	*x = ReadSuccess{}
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadSuccess) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadSuccess) ProtoMessage() {}
+
+func (x *ReadSuccess) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadSuccess.ProtoReflect.Descriptor instead.
+func (*ReadSuccess) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *ReadSuccess) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReadSuccess) GetTotalLines() int32 {
+	if x != nil {
+		return x.TotalLines
+	}
+	return 0
+}
+
+func (x *ReadSuccess) GetFileSize() int64 {
+	if x != nil {
+		return x.FileSize
+	}
+	return 0
+}
+
+func (x *ReadSuccess) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *ReadSuccess) GetOutput() isReadSuccess_Output {
+	if x != nil {
+		return x.Output
+	}
+	return nil
+}
+
+func (x *ReadSuccess) GetContent() string {
+	if x != nil {
+		if x, ok := x.Output.(*ReadSuccess_Content); ok {
+			return x.Content
+		}
+	}
+	return ""
+}
+
+func (x *ReadSuccess) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Output.(*ReadSuccess_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+func (x *ReadSuccess) GetRangeApplied() bool {
+	if x != nil {
+		return x.RangeApplied
+	}
+	return false
+}
+
+type isReadSuccess_Output interface {
+	isReadSuccess_Output()
+}
+
+type ReadSuccess_Content struct {
+	Content string `protobuf:"bytes,2,opt,name=content,proto3,oneof"`
+}
+
+type ReadSuccess_Data struct {
+	Data []byte `protobuf:"bytes,5,opt,name=data,proto3,oneof"`
+}
+
+func (*ReadSuccess_Content) isReadSuccess_Output() {}
+
+func (*ReadSuccess_Data) isReadSuccess_Output() {}
+
+type ReadError struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadError) Reset() {
+	*x = ReadError{}
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadError) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadError) ProtoMessage() {}
+
+func (x *ReadError) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadError.ProtoReflect.Descriptor instead.
+func (*ReadError) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *ReadError) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReadError) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type ReadFileNotFound struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadFileNotFound) Reset() {
+	*x = ReadFileNotFound{}
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadFileNotFound) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadFileNotFound) ProtoMessage() {}
+
+func (x *ReadFileNotFound) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadFileNotFound.ProtoReflect.Descriptor instead.
+func (*ReadFileNotFound) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *ReadFileNotFound) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type ReadResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Result:
+	//
+	//	*ReadResult_Success
+	//	*ReadResult_Error
+	//	*ReadResult_FileNotFound
+	Result        isReadResult_Result `protobuf_oneof:"result"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadResult) Reset() {
+	*x = ReadResult{}
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadResult) ProtoMessage() {}
+
+func (x *ReadResult) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadResult.ProtoReflect.Descriptor instead.
+func (*ReadResult) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *ReadResult) GetResult() isReadResult_Result {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *ReadResult) GetSuccess() *ReadSuccess {
+	if x != nil {
+		if x, ok := x.Result.(*ReadResult_Success); ok {
+			return x.Success
+		}
+	}
+	return nil
+}
+
+func (x *ReadResult) GetError() *ReadError {
+	if x != nil {
+		if x, ok := x.Result.(*ReadResult_Error); ok {
+			return x.Error
+		}
+	}
+	return nil
+}
+
+func (x *ReadResult) GetFileNotFound() *ReadFileNotFound {
+	if x != nil {
+		if x, ok := x.Result.(*ReadResult_FileNotFound); ok {
+			return x.FileNotFound
+		}
+	}
+	return nil
+}
+
+type isReadResult_Result interface {
+	isReadResult_Result()
+}
+
+type ReadResult_Success struct {
+	Success *ReadSuccess `protobuf:"bytes,1,opt,name=success,proto3,oneof"`
+}
+
+type ReadResult_Error struct {
+	Error *ReadError `protobuf:"bytes,2,opt,name=error,proto3,oneof"`
+}
+
+type ReadResult_FileNotFound struct {
+	FileNotFound *ReadFileNotFound `protobuf:"bytes,4,opt,name=file_not_found,json=fileNotFound,proto3,oneof"`
+}
+
+func (*ReadResult_Success) isReadResult_Result() {}
+
+func (*ReadResult_Error) isReadResult_Result() {}
+
+func (*ReadResult_FileNotFound) isReadResult_Result() {}
+
 type RequestContextSuccess struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RequestContext *RequestContext        `protobuf:"bytes,1,opt,name=request_context,json=requestContext,proto3" json:"request_context,omitempty"`
@@ -3463,7 +3862,7 @@ type RequestContextSuccess struct {
 
 func (x *RequestContextSuccess) Reset() {
 	*x = RequestContextSuccess{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[52]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3475,7 +3874,7 @@ func (x *RequestContextSuccess) String() string {
 func (*RequestContextSuccess) ProtoMessage() {}
 
 func (x *RequestContextSuccess) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[52]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3488,7 +3887,7 @@ func (x *RequestContextSuccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestContextSuccess.ProtoReflect.Descriptor instead.
 func (*RequestContextSuccess) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{52}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *RequestContextSuccess) GetRequestContext() *RequestContext {
@@ -3510,7 +3909,7 @@ type RequestContextResult struct {
 
 func (x *RequestContextResult) Reset() {
 	*x = RequestContextResult{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[53]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3522,7 +3921,7 @@ func (x *RequestContextResult) String() string {
 func (*RequestContextResult) ProtoMessage() {}
 
 func (x *RequestContextResult) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[53]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3535,7 +3934,7 @@ func (x *RequestContextResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestContextResult.ProtoReflect.Descriptor instead.
 func (*RequestContextResult) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{53}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *RequestContextResult) GetResult() isRequestContextResult_Result {
@@ -3571,6 +3970,7 @@ type ExecServerMessage struct {
 	// Types that are valid to be assigned to Message:
 	//
 	//	*ExecServerMessage_WriteArgs
+	//	*ExecServerMessage_ReadArgs
 	//	*ExecServerMessage_RequestContextArgs
 	//	*ExecServerMessage_McpArgs
 	Message       isExecServerMessage_Message `protobuf_oneof:"message"`
@@ -3580,7 +3980,7 @@ type ExecServerMessage struct {
 
 func (x *ExecServerMessage) Reset() {
 	*x = ExecServerMessage{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[54]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3592,7 +3992,7 @@ func (x *ExecServerMessage) String() string {
 func (*ExecServerMessage) ProtoMessage() {}
 
 func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[54]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3605,7 +4005,7 @@ func (x *ExecServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecServerMessage.ProtoReflect.Descriptor instead.
 func (*ExecServerMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{54}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ExecServerMessage) GetId() uint32 {
@@ -3638,6 +4038,15 @@ func (x *ExecServerMessage) GetWriteArgs() *WriteArgs {
 	return nil
 }
 
+func (x *ExecServerMessage) GetReadArgs() *ReadArgs {
+	if x != nil {
+		if x, ok := x.Message.(*ExecServerMessage_ReadArgs); ok {
+			return x.ReadArgs
+		}
+	}
+	return nil
+}
+
 func (x *ExecServerMessage) GetRequestContextArgs() *RequestContextArgs {
 	if x != nil {
 		if x, ok := x.Message.(*ExecServerMessage_RequestContextArgs); ok {
@@ -3664,6 +4073,10 @@ type ExecServerMessage_WriteArgs struct {
 	WriteArgs *WriteArgs `protobuf:"bytes,3,opt,name=write_args,json=writeArgs,proto3,oneof"`
 }
 
+type ExecServerMessage_ReadArgs struct {
+	ReadArgs *ReadArgs `protobuf:"bytes,7,opt,name=read_args,json=readArgs,proto3,oneof"`
+}
+
 type ExecServerMessage_RequestContextArgs struct {
 	RequestContextArgs *RequestContextArgs `protobuf:"bytes,10,opt,name=request_context_args,json=requestContextArgs,proto3,oneof"`
 }
@@ -3673,6 +4086,8 @@ type ExecServerMessage_McpArgs struct {
 }
 
 func (*ExecServerMessage_WriteArgs) isExecServerMessage_Message() {}
+
+func (*ExecServerMessage_ReadArgs) isExecServerMessage_Message() {}
 
 func (*ExecServerMessage_RequestContextArgs) isExecServerMessage_Message() {}
 
@@ -3685,6 +4100,7 @@ type ExecClientMessage struct {
 	// Types that are valid to be assigned to Message:
 	//
 	//	*ExecClientMessage_WriteResult
+	//	*ExecClientMessage_ReadResult
 	//	*ExecClientMessage_RequestContextResult
 	//	*ExecClientMessage_McpResult
 	Message       isExecClientMessage_Message `protobuf_oneof:"message"`
@@ -3694,7 +4110,7 @@ type ExecClientMessage struct {
 
 func (x *ExecClientMessage) Reset() {
 	*x = ExecClientMessage{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[55]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3706,7 +4122,7 @@ func (x *ExecClientMessage) String() string {
 func (*ExecClientMessage) ProtoMessage() {}
 
 func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[55]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3719,7 +4135,7 @@ func (x *ExecClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientMessage.ProtoReflect.Descriptor instead.
 func (*ExecClientMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{55}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ExecClientMessage) GetId() uint32 {
@@ -3752,6 +4168,15 @@ func (x *ExecClientMessage) GetWriteResult() *WriteResult {
 	return nil
 }
 
+func (x *ExecClientMessage) GetReadResult() *ReadResult {
+	if x != nil {
+		if x, ok := x.Message.(*ExecClientMessage_ReadResult); ok {
+			return x.ReadResult
+		}
+	}
+	return nil
+}
+
 func (x *ExecClientMessage) GetRequestContextResult() *RequestContextResult {
 	if x != nil {
 		if x, ok := x.Message.(*ExecClientMessage_RequestContextResult); ok {
@@ -3778,6 +4203,10 @@ type ExecClientMessage_WriteResult struct {
 	WriteResult *WriteResult `protobuf:"bytes,3,opt,name=write_result,json=writeResult,proto3,oneof"`
 }
 
+type ExecClientMessage_ReadResult struct {
+	ReadResult *ReadResult `protobuf:"bytes,7,opt,name=read_result,json=readResult,proto3,oneof"`
+}
+
 type ExecClientMessage_RequestContextResult struct {
 	RequestContextResult *RequestContextResult `protobuf:"bytes,10,opt,name=request_context_result,json=requestContextResult,proto3,oneof"`
 }
@@ -3787,6 +4216,8 @@ type ExecClientMessage_McpResult struct {
 }
 
 func (*ExecClientMessage_WriteResult) isExecClientMessage_Message() {}
+
+func (*ExecClientMessage_ReadResult) isExecClientMessage_Message() {}
 
 func (*ExecClientMessage_RequestContextResult) isExecClientMessage_Message() {}
 
@@ -3801,7 +4232,7 @@ type ExecClientStreamClose struct {
 
 func (x *ExecClientStreamClose) Reset() {
 	*x = ExecClientStreamClose{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[56]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3813,7 +4244,7 @@ func (x *ExecClientStreamClose) String() string {
 func (*ExecClientStreamClose) ProtoMessage() {}
 
 func (x *ExecClientStreamClose) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[56]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3826,7 +4257,7 @@ func (x *ExecClientStreamClose) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientStreamClose.ProtoReflect.Descriptor instead.
 func (*ExecClientStreamClose) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{56}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ExecClientStreamClose) GetId() uint32 {
@@ -3847,7 +4278,7 @@ type ExecClientThrow struct {
 
 func (x *ExecClientThrow) Reset() {
 	*x = ExecClientThrow{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[57]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3859,7 +4290,7 @@ func (x *ExecClientThrow) String() string {
 func (*ExecClientThrow) ProtoMessage() {}
 
 func (x *ExecClientThrow) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[57]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3872,7 +4303,7 @@ func (x *ExecClientThrow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientThrow.ProtoReflect.Descriptor instead.
 func (*ExecClientThrow) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{57}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ExecClientThrow) GetId() uint32 {
@@ -3909,7 +4340,7 @@ type ExecClientControlMessage struct {
 
 func (x *ExecClientControlMessage) Reset() {
 	*x = ExecClientControlMessage{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[58]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3921,7 +4352,7 @@ func (x *ExecClientControlMessage) String() string {
 func (*ExecClientControlMessage) ProtoMessage() {}
 
 func (x *ExecClientControlMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[58]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3934,7 +4365,7 @@ func (x *ExecClientControlMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecClientControlMessage.ProtoReflect.Descriptor instead.
 func (*ExecClientControlMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{58}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ExecClientControlMessage) GetMessage() isExecClientControlMessage_Message {
@@ -3995,7 +4426,7 @@ type AgentClientMessage struct {
 
 func (x *AgentClientMessage) Reset() {
 	*x = AgentClientMessage{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[59]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4007,7 +4438,7 @@ func (x *AgentClientMessage) String() string {
 func (*AgentClientMessage) ProtoMessage() {}
 
 func (x *AgentClientMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[59]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4020,7 +4451,7 @@ func (x *AgentClientMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentClientMessage.ProtoReflect.Descriptor instead.
 func (*AgentClientMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{59}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *AgentClientMessage) GetMessage() isAgentClientMessage_Message {
@@ -4136,7 +4567,7 @@ type AgentServerMetrics struct {
 
 func (x *AgentServerMetrics) Reset() {
 	*x = AgentServerMetrics{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[60]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4148,7 +4579,7 @@ func (x *AgentServerMetrics) String() string {
 func (*AgentServerMetrics) ProtoMessage() {}
 
 func (x *AgentServerMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[60]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4161,7 +4592,7 @@ func (x *AgentServerMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentServerMetrics.ProtoReflect.Descriptor instead.
 func (*AgentServerMetrics) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{60}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *AgentServerMetrics) GetMetric_1() float64 {
@@ -4209,7 +4640,7 @@ type AgentServerMessage struct {
 
 func (x *AgentServerMessage) Reset() {
 	*x = AgentServerMessage{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[61]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4221,7 +4652,7 @@ func (x *AgentServerMessage) String() string {
 func (*AgentServerMessage) ProtoMessage() {}
 
 func (x *AgentServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[61]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4234,7 +4665,7 @@ func (x *AgentServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentServerMessage.ProtoReflect.Descriptor instead.
 func (*AgentServerMessage) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{61}
+	return file_agent_v1_agent_mvp_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *AgentServerMessage) GetMessage() isAgentServerMessage_Message {
@@ -4349,7 +4780,7 @@ type RequestedModel_ModelParameterValue struct {
 
 func (x *RequestedModel_ModelParameterValue) Reset() {
 	*x = RequestedModel_ModelParameterValue{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[62]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4361,7 +4792,7 @@ func (x *RequestedModel_ModelParameterValue) String() string {
 func (*RequestedModel_ModelParameterValue) ProtoMessage() {}
 
 func (x *RequestedModel_ModelParameterValue) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[62]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4400,7 +4831,7 @@ type GenerateImageRequestResponse_Approved struct {
 
 func (x *GenerateImageRequestResponse_Approved) Reset() {
 	*x = GenerateImageRequestResponse_Approved{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[64]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4412,7 +4843,7 @@ func (x *GenerateImageRequestResponse_Approved) String() string {
 func (*GenerateImageRequestResponse_Approved) ProtoMessage() {}
 
 func (x *GenerateImageRequestResponse_Approved) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[64]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4444,7 +4875,7 @@ type GenerateImageRequestResponse_Rejected struct {
 
 func (x *GenerateImageRequestResponse_Rejected) Reset() {
 	*x = GenerateImageRequestResponse_Rejected{}
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[65]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4456,7 +4887,7 @@ func (x *GenerateImageRequestResponse_Rejected) String() string {
 func (*GenerateImageRequestResponse_Rejected) ProtoMessage() {}
 
 func (x *GenerateImageRequestResponse_Rejected) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_mvp_proto_msgTypes[65]
+	mi := &file_agent_v1_agent_mvp_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4748,25 +5179,59 @@ const file_agent_v1_agent_mvp_proto_rawDesc = "" +
 	"\vWriteResult\x122\n" +
 	"\asuccess\x18\x01 \x01(\v2\x16.agent.v1.WriteSuccessH\x00R\asuccess\x12,\n" +
 	"\x05error\x18\x05 \x01(\v2\x14.agent.v1.WriteErrorH\x00R\x05errorB\b\n" +
+	"\x06result\"\xc9\x01\n" +
+	"\bReadArgs\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12 \n" +
+	"\ftool_call_id\x18\x02 \x01(\tR\n" +
+	"toolCallId\x12\x1b\n" +
+	"\x06offset\x18\x04 \x01(\x05H\x00R\x06offset\x88\x01\x01\x12\x19\n" +
+	"\x05limit\x18\x05 \x01(\rH\x01R\x05limit\x88\x01\x01\x12(\n" +
+	"\rencoding_hint\x18\x06 \x01(\tH\x02R\fencodingHint\x88\x01\x01B\t\n" +
+	"\a_offsetB\b\n" +
+	"\x06_limitB\x10\n" +
+	"\x0e_encoding_hint\"\xde\x01\n" +
+	"\vReadSuccess\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1f\n" +
+	"\vtotal_lines\x18\x03 \x01(\x05R\n" +
+	"totalLines\x12\x1b\n" +
+	"\tfile_size\x18\x04 \x01(\x03R\bfileSize\x12\x1c\n" +
+	"\ttruncated\x18\x06 \x01(\bR\ttruncated\x12\x1a\n" +
+	"\acontent\x18\x02 \x01(\tH\x00R\acontent\x12\x14\n" +
+	"\x04data\x18\x05 \x01(\fH\x00R\x04data\x12#\n" +
+	"\rrange_applied\x18\b \x01(\bR\frangeAppliedB\b\n" +
+	"\x06output\"5\n" +
+	"\tReadError\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"&\n" +
+	"\x10ReadFileNotFound\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xba\x01\n" +
+	"\n" +
+	"ReadResult\x121\n" +
+	"\asuccess\x18\x01 \x01(\v2\x15.agent.v1.ReadSuccessH\x00R\asuccess\x12+\n" +
+	"\x05error\x18\x02 \x01(\v2\x13.agent.v1.ReadErrorH\x00R\x05error\x12B\n" +
+	"\x0efile_not_found\x18\x04 \x01(\v2\x1a.agent.v1.ReadFileNotFoundH\x00R\ffileNotFoundB\b\n" +
 	"\x06result\"Z\n" +
 	"\x15RequestContextSuccess\x12A\n" +
 	"\x0frequest_context\x18\x01 \x01(\v2\x18.agent.v1.RequestContextR\x0erequestContext\"]\n" +
 	"\x14RequestContextResult\x12;\n" +
 	"\asuccess\x18\x01 \x01(\v2\x1f.agent.v1.RequestContextSuccessH\x00R\asuccessB\b\n" +
-	"\x06result\"\xff\x01\n" +
+	"\x06result\"\xb2\x02\n" +
 	"\x11ExecServerMessage\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x12\x17\n" +
 	"\aexec_id\x18\x0f \x01(\tR\x06execId\x124\n" +
 	"\n" +
-	"write_args\x18\x03 \x01(\v2\x13.agent.v1.WriteArgsH\x00R\twriteArgs\x12P\n" +
+	"write_args\x18\x03 \x01(\v2\x13.agent.v1.WriteArgsH\x00R\twriteArgs\x121\n" +
+	"\tread_args\x18\a \x01(\v2\x12.agent.v1.ReadArgsH\x00R\breadArgs\x12P\n" +
 	"\x14request_context_args\x18\n" +
 	" \x01(\v2\x1c.agent.v1.RequestContextArgsH\x00R\x12requestContextArgs\x12.\n" +
 	"\bmcp_args\x18\v \x01(\v2\x11.agent.v1.McpArgsH\x00R\amcpArgsB\t\n" +
-	"\amessage\"\x91\x02\n" +
+	"\amessage\"\xca\x02\n" +
 	"\x11ExecClientMessage\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x12\x17\n" +
 	"\aexec_id\x18\x0f \x01(\tR\x06execId\x12:\n" +
-	"\fwrite_result\x18\x03 \x01(\v2\x15.agent.v1.WriteResultH\x00R\vwriteResult\x12V\n" +
+	"\fwrite_result\x18\x03 \x01(\v2\x15.agent.v1.WriteResultH\x00R\vwriteResult\x127\n" +
+	"\vread_result\x18\a \x01(\v2\x14.agent.v1.ReadResultH\x00R\n" +
+	"readResult\x12V\n" +
 	"\x16request_context_result\x18\n" +
 	" \x01(\v2\x1e.agent.v1.RequestContextResultH\x00R\x14requestContextResult\x124\n" +
 	"\n" +
@@ -4819,7 +5284,7 @@ func file_agent_v1_agent_mvp_proto_rawDescGZIP() []byte {
 	return file_agent_v1_agent_mvp_proto_rawDescData
 }
 
-var file_agent_v1_agent_mvp_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
+var file_agent_v1_agent_mvp_proto_msgTypes = make([]protoimpl.MessageInfo, 71)
 var file_agent_v1_agent_mvp_proto_goTypes = []any{
 	(*UserMessage)(nil),                        // 0: agent.v1.UserMessage
 	(*UserMessageAction)(nil),                  // 1: agent.v1.UserMessageAction
@@ -4873,36 +5338,41 @@ var file_agent_v1_agent_mvp_proto_goTypes = []any{
 	(*WriteSuccess)(nil),                       // 49: agent.v1.WriteSuccess
 	(*WriteError)(nil),                         // 50: agent.v1.WriteError
 	(*WriteResult)(nil),                        // 51: agent.v1.WriteResult
-	(*RequestContextSuccess)(nil),              // 52: agent.v1.RequestContextSuccess
-	(*RequestContextResult)(nil),               // 53: agent.v1.RequestContextResult
-	(*ExecServerMessage)(nil),                  // 54: agent.v1.ExecServerMessage
-	(*ExecClientMessage)(nil),                  // 55: agent.v1.ExecClientMessage
-	(*ExecClientStreamClose)(nil),              // 56: agent.v1.ExecClientStreamClose
-	(*ExecClientThrow)(nil),                    // 57: agent.v1.ExecClientThrow
-	(*ExecClientControlMessage)(nil),           // 58: agent.v1.ExecClientControlMessage
-	(*AgentClientMessage)(nil),                 // 59: agent.v1.AgentClientMessage
-	(*AgentServerMetrics)(nil),                 // 60: agent.v1.AgentServerMetrics
-	(*AgentServerMessage)(nil),                 // 61: agent.v1.AgentServerMessage
-	(*RequestedModel_ModelParameterValue)(nil), // 62: agent.v1.RequestedModel.ModelParameterValue
-	nil, // 63: agent.v1.McpArgs.ArgsEntry
-	(*GenerateImageRequestResponse_Approved)(nil), // 64: agent.v1.GenerateImageRequestResponse.Approved
-	(*GenerateImageRequestResponse_Rejected)(nil), // 65: agent.v1.GenerateImageRequestResponse.Rejected
-	(*structpb.Value)(nil),                        // 66: google.protobuf.Value
+	(*ReadArgs)(nil),                           // 52: agent.v1.ReadArgs
+	(*ReadSuccess)(nil),                        // 53: agent.v1.ReadSuccess
+	(*ReadError)(nil),                          // 54: agent.v1.ReadError
+	(*ReadFileNotFound)(nil),                   // 55: agent.v1.ReadFileNotFound
+	(*ReadResult)(nil),                         // 56: agent.v1.ReadResult
+	(*RequestContextSuccess)(nil),              // 57: agent.v1.RequestContextSuccess
+	(*RequestContextResult)(nil),               // 58: agent.v1.RequestContextResult
+	(*ExecServerMessage)(nil),                  // 59: agent.v1.ExecServerMessage
+	(*ExecClientMessage)(nil),                  // 60: agent.v1.ExecClientMessage
+	(*ExecClientStreamClose)(nil),              // 61: agent.v1.ExecClientStreamClose
+	(*ExecClientThrow)(nil),                    // 62: agent.v1.ExecClientThrow
+	(*ExecClientControlMessage)(nil),           // 63: agent.v1.ExecClientControlMessage
+	(*AgentClientMessage)(nil),                 // 64: agent.v1.AgentClientMessage
+	(*AgentServerMetrics)(nil),                 // 65: agent.v1.AgentServerMetrics
+	(*AgentServerMessage)(nil),                 // 66: agent.v1.AgentServerMessage
+	(*RequestedModel_ModelParameterValue)(nil), // 67: agent.v1.RequestedModel.ModelParameterValue
+	nil, // 68: agent.v1.McpArgs.ArgsEntry
+	(*GenerateImageRequestResponse_Approved)(nil), // 69: agent.v1.GenerateImageRequestResponse.Approved
+	(*GenerateImageRequestResponse_Rejected)(nil), // 70: agent.v1.GenerateImageRequestResponse.Rejected
+	(*structpb.Value)(nil),                        // 71: google.protobuf.Value
 }
 var file_agent_v1_agent_mvp_proto_depIdxs = []int32{
 	0,  // 0: agent.v1.UserMessageAction.user_message:type_name -> agent.v1.UserMessage
 	1,  // 1: agent.v1.ConversationAction.user_message_action:type_name -> agent.v1.UserMessageAction
 	2,  // 2: agent.v1.ConversationAction.resume_action:type_name -> agent.v1.ResumeAction
 	5,  // 3: agent.v1.GetUsableModelsResponse.models:type_name -> agent.v1.ModelDetails
-	62, // 4: agent.v1.RequestedModel.parameters:type_name -> agent.v1.RequestedModel.ModelParameterValue
-	66, // 5: agent.v1.McpToolDefinition.input_schema:type_name -> google.protobuf.Value
+	67, // 4: agent.v1.RequestedModel.parameters:type_name -> agent.v1.RequestedModel.ModelParameterValue
+	71, // 5: agent.v1.McpToolDefinition.input_schema:type_name -> google.protobuf.Value
 	9,  // 6: agent.v1.McpTools.mcp_tools:type_name -> agent.v1.McpToolDefinition
 	4,  // 7: agent.v1.AgentRunRequest.conversation_state:type_name -> agent.v1.ConversationStateStructure
 	3,  // 8: agent.v1.AgentRunRequest.action:type_name -> agent.v1.ConversationAction
 	5,  // 9: agent.v1.AgentRunRequest.model_details:type_name -> agent.v1.ModelDetails
 	10, // 10: agent.v1.AgentRunRequest.mcp_tools:type_name -> agent.v1.McpTools
 	8,  // 11: agent.v1.AgentRunRequest.requested_model:type_name -> agent.v1.RequestedModel
-	63, // 12: agent.v1.McpArgs.args:type_name -> agent.v1.McpArgs.ArgsEntry
+	68, // 12: agent.v1.McpArgs.args:type_name -> agent.v1.McpArgs.ArgsEntry
 	16, // 13: agent.v1.McpToolResultContentItem.text:type_name -> agent.v1.McpTextContent
 	17, // 14: agent.v1.McpSuccess.content:type_name -> agent.v1.McpToolResultContentItem
 	18, // 15: agent.v1.McpResult.success:type_name -> agent.v1.McpSuccess
@@ -4926,8 +5396,8 @@ var file_agent_v1_agent_mvp_proto_depIdxs = []int32{
 	32, // 33: agent.v1.InteractionUpdate.partial_tool_call:type_name -> agent.v1.PartialToolCallUpdate
 	14, // 34: agent.v1.InteractionUpdate.turn_ended:type_name -> agent.v1.TurnEndedUpdate
 	24, // 35: agent.v1.GenerateImageRequestQuery.args:type_name -> agent.v1.GenerateImageArgs
-	64, // 36: agent.v1.GenerateImageRequestResponse.approved:type_name -> agent.v1.GenerateImageRequestResponse.Approved
-	65, // 37: agent.v1.GenerateImageRequestResponse.rejected:type_name -> agent.v1.GenerateImageRequestResponse.Rejected
+	69, // 36: agent.v1.GenerateImageRequestResponse.approved:type_name -> agent.v1.GenerateImageRequestResponse.Approved
+	70, // 37: agent.v1.GenerateImageRequestResponse.rejected:type_name -> agent.v1.GenerateImageRequestResponse.Rejected
 	35, // 38: agent.v1.InteractionQuery.generate_image_request_query:type_name -> agent.v1.GenerateImageRequestQuery
 	36, // 39: agent.v1.InteractionResponse.generate_image_request_response:type_name -> agent.v1.GenerateImageRequestResponse
 	39, // 40: agent.v1.KvServerMessage.get_blob_args:type_name -> agent.v1.GetBlobArgs
@@ -4938,34 +5408,39 @@ var file_agent_v1_agent_mvp_proto_depIdxs = []int32{
 	9,  // 45: agent.v1.RequestContext.tools:type_name -> agent.v1.McpToolDefinition
 	49, // 46: agent.v1.WriteResult.success:type_name -> agent.v1.WriteSuccess
 	50, // 47: agent.v1.WriteResult.error:type_name -> agent.v1.WriteError
-	47, // 48: agent.v1.RequestContextSuccess.request_context:type_name -> agent.v1.RequestContext
-	52, // 49: agent.v1.RequestContextResult.success:type_name -> agent.v1.RequestContextSuccess
-	48, // 50: agent.v1.ExecServerMessage.write_args:type_name -> agent.v1.WriteArgs
-	45, // 51: agent.v1.ExecServerMessage.request_context_args:type_name -> agent.v1.RequestContextArgs
-	15, // 52: agent.v1.ExecServerMessage.mcp_args:type_name -> agent.v1.McpArgs
-	51, // 53: agent.v1.ExecClientMessage.write_result:type_name -> agent.v1.WriteResult
-	53, // 54: agent.v1.ExecClientMessage.request_context_result:type_name -> agent.v1.RequestContextResult
-	22, // 55: agent.v1.ExecClientMessage.mcp_result:type_name -> agent.v1.McpResult
-	56, // 56: agent.v1.ExecClientControlMessage.stream_close:type_name -> agent.v1.ExecClientStreamClose
-	57, // 57: agent.v1.ExecClientControlMessage.throw:type_name -> agent.v1.ExecClientThrow
-	11, // 58: agent.v1.AgentClientMessage.run_request:type_name -> agent.v1.AgentRunRequest
-	55, // 59: agent.v1.AgentClientMessage.exec_client_message:type_name -> agent.v1.ExecClientMessage
-	44, // 60: agent.v1.AgentClientMessage.kv_client_message:type_name -> agent.v1.KvClientMessage
-	58, // 61: agent.v1.AgentClientMessage.exec_client_control_message:type_name -> agent.v1.ExecClientControlMessage
-	38, // 62: agent.v1.AgentClientMessage.interaction_response:type_name -> agent.v1.InteractionResponse
-	34, // 63: agent.v1.AgentClientMessage.client_heartbeat:type_name -> agent.v1.ClientHeartbeat
-	33, // 64: agent.v1.AgentServerMessage.interaction_update:type_name -> agent.v1.InteractionUpdate
-	54, // 65: agent.v1.AgentServerMessage.exec_server_message:type_name -> agent.v1.ExecServerMessage
-	4,  // 66: agent.v1.AgentServerMessage.conversation_checkpoint_update:type_name -> agent.v1.ConversationStateStructure
-	43, // 67: agent.v1.AgentServerMessage.kv_server_message:type_name -> agent.v1.KvServerMessage
-	37, // 68: agent.v1.AgentServerMessage.interaction_query:type_name -> agent.v1.InteractionQuery
-	60, // 69: agent.v1.AgentServerMessage.server_metrics:type_name -> agent.v1.AgentServerMetrics
-	66, // 70: agent.v1.McpArgs.ArgsEntry.value:type_name -> google.protobuf.Value
-	71, // [71:71] is the sub-list for method output_type
-	71, // [71:71] is the sub-list for method input_type
-	71, // [71:71] is the sub-list for extension type_name
-	71, // [71:71] is the sub-list for extension extendee
-	0,  // [0:71] is the sub-list for field type_name
+	53, // 48: agent.v1.ReadResult.success:type_name -> agent.v1.ReadSuccess
+	54, // 49: agent.v1.ReadResult.error:type_name -> agent.v1.ReadError
+	55, // 50: agent.v1.ReadResult.file_not_found:type_name -> agent.v1.ReadFileNotFound
+	47, // 51: agent.v1.RequestContextSuccess.request_context:type_name -> agent.v1.RequestContext
+	57, // 52: agent.v1.RequestContextResult.success:type_name -> agent.v1.RequestContextSuccess
+	48, // 53: agent.v1.ExecServerMessage.write_args:type_name -> agent.v1.WriteArgs
+	52, // 54: agent.v1.ExecServerMessage.read_args:type_name -> agent.v1.ReadArgs
+	45, // 55: agent.v1.ExecServerMessage.request_context_args:type_name -> agent.v1.RequestContextArgs
+	15, // 56: agent.v1.ExecServerMessage.mcp_args:type_name -> agent.v1.McpArgs
+	51, // 57: agent.v1.ExecClientMessage.write_result:type_name -> agent.v1.WriteResult
+	56, // 58: agent.v1.ExecClientMessage.read_result:type_name -> agent.v1.ReadResult
+	58, // 59: agent.v1.ExecClientMessage.request_context_result:type_name -> agent.v1.RequestContextResult
+	22, // 60: agent.v1.ExecClientMessage.mcp_result:type_name -> agent.v1.McpResult
+	61, // 61: agent.v1.ExecClientControlMessage.stream_close:type_name -> agent.v1.ExecClientStreamClose
+	62, // 62: agent.v1.ExecClientControlMessage.throw:type_name -> agent.v1.ExecClientThrow
+	11, // 63: agent.v1.AgentClientMessage.run_request:type_name -> agent.v1.AgentRunRequest
+	60, // 64: agent.v1.AgentClientMessage.exec_client_message:type_name -> agent.v1.ExecClientMessage
+	44, // 65: agent.v1.AgentClientMessage.kv_client_message:type_name -> agent.v1.KvClientMessage
+	63, // 66: agent.v1.AgentClientMessage.exec_client_control_message:type_name -> agent.v1.ExecClientControlMessage
+	38, // 67: agent.v1.AgentClientMessage.interaction_response:type_name -> agent.v1.InteractionResponse
+	34, // 68: agent.v1.AgentClientMessage.client_heartbeat:type_name -> agent.v1.ClientHeartbeat
+	33, // 69: agent.v1.AgentServerMessage.interaction_update:type_name -> agent.v1.InteractionUpdate
+	59, // 70: agent.v1.AgentServerMessage.exec_server_message:type_name -> agent.v1.ExecServerMessage
+	4,  // 71: agent.v1.AgentServerMessage.conversation_checkpoint_update:type_name -> agent.v1.ConversationStateStructure
+	43, // 72: agent.v1.AgentServerMessage.kv_server_message:type_name -> agent.v1.KvServerMessage
+	37, // 73: agent.v1.AgentServerMessage.interaction_query:type_name -> agent.v1.InteractionQuery
+	65, // 74: agent.v1.AgentServerMessage.server_metrics:type_name -> agent.v1.AgentServerMetrics
+	71, // 75: agent.v1.McpArgs.ArgsEntry.value:type_name -> google.protobuf.Value
+	76, // [76:76] is the sub-list for method output_type
+	76, // [76:76] is the sub-list for method input_type
+	76, // [76:76] is the sub-list for extension type_name
+	76, // [76:76] is the sub-list for extension extendee
+	0,  // [0:76] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_mvp_proto_init() }
@@ -5033,25 +5508,37 @@ func file_agent_v1_agent_mvp_proto_init() {
 		(*WriteResult_Success)(nil),
 		(*WriteResult_Error)(nil),
 	}
+	file_agent_v1_agent_mvp_proto_msgTypes[52].OneofWrappers = []any{}
 	file_agent_v1_agent_mvp_proto_msgTypes[53].OneofWrappers = []any{
+		(*ReadSuccess_Content)(nil),
+		(*ReadSuccess_Data)(nil),
+	}
+	file_agent_v1_agent_mvp_proto_msgTypes[56].OneofWrappers = []any{
+		(*ReadResult_Success)(nil),
+		(*ReadResult_Error)(nil),
+		(*ReadResult_FileNotFound)(nil),
+	}
+	file_agent_v1_agent_mvp_proto_msgTypes[58].OneofWrappers = []any{
 		(*RequestContextResult_Success)(nil),
 	}
-	file_agent_v1_agent_mvp_proto_msgTypes[54].OneofWrappers = []any{
+	file_agent_v1_agent_mvp_proto_msgTypes[59].OneofWrappers = []any{
 		(*ExecServerMessage_WriteArgs)(nil),
+		(*ExecServerMessage_ReadArgs)(nil),
 		(*ExecServerMessage_RequestContextArgs)(nil),
 		(*ExecServerMessage_McpArgs)(nil),
 	}
-	file_agent_v1_agent_mvp_proto_msgTypes[55].OneofWrappers = []any{
+	file_agent_v1_agent_mvp_proto_msgTypes[60].OneofWrappers = []any{
 		(*ExecClientMessage_WriteResult)(nil),
+		(*ExecClientMessage_ReadResult)(nil),
 		(*ExecClientMessage_RequestContextResult)(nil),
 		(*ExecClientMessage_McpResult)(nil),
 	}
-	file_agent_v1_agent_mvp_proto_msgTypes[57].OneofWrappers = []any{}
-	file_agent_v1_agent_mvp_proto_msgTypes[58].OneofWrappers = []any{
+	file_agent_v1_agent_mvp_proto_msgTypes[62].OneofWrappers = []any{}
+	file_agent_v1_agent_mvp_proto_msgTypes[63].OneofWrappers = []any{
 		(*ExecClientControlMessage_StreamClose)(nil),
 		(*ExecClientControlMessage_Throw)(nil),
 	}
-	file_agent_v1_agent_mvp_proto_msgTypes[59].OneofWrappers = []any{
+	file_agent_v1_agent_mvp_proto_msgTypes[64].OneofWrappers = []any{
 		(*AgentClientMessage_RunRequest)(nil),
 		(*AgentClientMessage_ExecClientMessage)(nil),
 		(*AgentClientMessage_KvClientMessage)(nil),
@@ -5059,7 +5546,7 @@ func file_agent_v1_agent_mvp_proto_init() {
 		(*AgentClientMessage_InteractionResponse)(nil),
 		(*AgentClientMessage_ClientHeartbeat)(nil),
 	}
-	file_agent_v1_agent_mvp_proto_msgTypes[61].OneofWrappers = []any{
+	file_agent_v1_agent_mvp_proto_msgTypes[66].OneofWrappers = []any{
 		(*AgentServerMessage_InteractionUpdate)(nil),
 		(*AgentServerMessage_ExecServerMessage)(nil),
 		(*AgentServerMessage_ConversationCheckpointUpdate)(nil),
@@ -5073,7 +5560,7 @@ func file_agent_v1_agent_mvp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_v1_agent_mvp_proto_rawDesc), len(file_agent_v1_agent_mvp_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   66,
+			NumMessages:   71,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
