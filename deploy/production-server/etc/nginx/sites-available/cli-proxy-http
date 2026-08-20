@@ -4,17 +4,28 @@ server {
     server_name _;
 
     client_max_body_size 50m;
+    # ACME HTTP-01 challenge for the sslip.io hostname certificate.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+        default_type "text/plain";
+    }
+
+    # Links handed out before the trusted certificate existed point at this
+    # host over plain http; send them to the origin every client can validate.
+    location ^~ /cursor-images/ {
+        return 301 https://15-204-94-214.sslip.io$request_uri;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8317;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # The gateway builds absolute URLs for generated images from these.
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 900s;
-        proxy_send_timeout 900s;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
     }
 }

@@ -14,18 +14,35 @@
 | `relay-adapter@.service` | 每账号 Claude Code 适配器（Node，Unix socket `/run/relay/agent-<account>.sock`） |
 | `relay-egress-guard.service` | netfilter 出口防护（网关 uid 禁止非回环出网） |
 | `rqlite-relay.service` | rqlite 亲和/封禁状态存储（127.0.0.1:4001） |
-| `nginx`（sites: `cli-proxy`, `cli-proxy-http`） | 80/443 反代到 127.0.0.1:8317，SSE 长连接 900s 超时，透传 `X-Forwarded-Proto` |
+| `nginx`（sites: `cli-proxy`, `cli-proxy-http`, `cli-proxy-tls-hostname`） | 80/443 反代到 127.0.0.1:8317，SSE 长连接 1800s 超时，透传 `X-Forwarded-Proto` |
+| `certbot.timer` | 续期 `15-204-94-214.sslip.io` 的 Let's Encrypt 证书 |
+
+> **改 nginx 时注意**：`/etc/nginx/sites-enabled/cli-proxy` 和 `cli-proxy-http` 是**普通文件，
+> 不是指向 sites-available 的软链**（只有 `grok-dashboard` 是软链）。改 `sites-available`
+> 不会生效，必须改 `sites-enabled` 下的那一份。备份文件也不能留在 `sites-enabled/`，
+> 否则会被 `include sites-enabled/*` 加载并报 duplicate default server；本机备份放在
+> `/etc/nginx/site-backups/`。
 
 ## 生成图片的对外地址
 
 Cursor 生成的图片由网关自己托管在 `GET /cursor-images/<随机名>.png`（无需 API key，
-URL 本身即凭据，12 小时过期）。聊天回复里给出的是这个 URL，而不是 data URL——客户端的
+URL 本身即凭据，72 小时过期）。聊天回复里给出的是这个 URL，而不是 data URL——客户端的
 markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`，表现就是
 `[Image blocked: …]`。
 
-默认取自入站请求的 `Host` + `X-Forwarded-Proto`。本机 443 用的是自签证书，客户端的
-渲染引擎不信任它，因此 drop-in `cli-proxy-api.service.d/public-base-url.conf` 把地址
-固定到 `http://15.204.94.214`。换成受信任证书后删掉该 drop-in 即可。
+对外地址默认取自入站请求的 `Host` + `X-Forwarded-Proto`，但本机 443 的默认证书是给裸 IP
+签的自签证书：客户端渲染器/Node 侧再去抓这个图就会报 `DEPTH_ZERO_SELF_SIGNED_CERT`。
+因此这台机器上：
+
+- `15-204-94-214.sslip.io` 解析到本机 IP，用 webroot（`/var/www/acme`）签了 Let's Encrypt
+  证书，由 `sites-available/cli-proxy-tls-hostname` 这个 vhost 提供，任何客户端都信任；
+  裸 IP 的自签 vhost 原样保留，现有 API 客户端不受影响。
+- drop-in `cli-proxy-api.service.d/public-base-url.conf` 把 `CPA_PUBLIC_BASE_URL` 固定为
+  `https://15-204-94-214.sslip.io`，并把图片缓存目录指到 `/opt/cli-proxy/image-cache`
+  （服务用户 `cliproxy` 没有 home，且 `PrivateTmp=true` 会在重启时清空 /tmp）。
+- 80 端口对 `/cursor-images/` 做 301，把换证书之前发出去的旧链接也导到受信任域名。
+- 续期由 `certbot.timer` 负责，`renewal-hooks/deploy/reload-nginx.sh` 在续期后 reload nginx。
+  换成自有域名后，改 drop-in 里的地址 + 新签一张证书即可。
 
 ## 目录对照
 
@@ -38,7 +55,8 @@ opt/cli-proxy/                    # 服务器 /opt/cli-proxy（运行时主目�
   etc/cursor-proxy.env            # Cursor 出口代理环境变量（已脱敏）
   static/management.html          # 管理面板单页 UI
 etc/systemd/system/               # 服务器上的 systemd 单元及 drop-in
-etc/nginx/sites-available/        # nginx 反代站点配置
+etc/nginx/sites-available/        # nginx 反代站点配置（线上生效的是 sites-enabled 下的同名普通文件）
+etc/letsencrypt/renewal-hooks/    # 证书续期后的 nginx reload 钩子
 home/ubuntu/modeb-deploy/         # 原始部署包（setup.sh / egress-guard.sh / 配置模板 / systemd 模板）
 home/ubuntu/cachetest/            # 缓存命中对比测试脚本（run_cachetest_gw.sh，已脱敏）
 ```
