@@ -996,22 +996,63 @@ var markdownImagePattern = regexp.MustCompile(`!\[([^\]\n]*)\]\(([^)\s]+)\)`)
 // generatedImageAlt is the alt text used for images this proxy inserts itself.
 const generatedImageAlt = "Generated image"
 
-// cursorImageURLs hosts a run's generated images and returns one URL per
-// image, in order. Hosting is preferred over a data URL because chat clients
-// sanitise assistant markdown before rendering it and the common sanitisers
-// reject data: URLs outright, which is what surfaces as "[Image blocked: …]".
+// imageDeliveryEnv selects how a generated image reaches the caller.
+const imageDeliveryEnv = "CPA_IMAGE_DELIVERY"
+
+type imageDelivery int
+
+const (
+	// imageDeliveryLink points at the gateway with an absolute URL. It renders
+	// everywhere, at the cost of naming the host in the reply.
+	imageDeliveryLink imageDelivery = iota
+	// imageDeliveryPath keeps the hosted copy but emits a host-relative URL,
+	// so the reply names no origin and whatever fronts the gateway resolves
+	// it. Only clients that resolve relative markdown against the API origin
+	// can render this.
+	imageDeliveryPath
+	// imageDeliveryInline embeds the bytes as a data: URL. Nothing in the
+	// reply identifies the gateway, but markdown sanitisers used by some chat
+	// clients (harden-react-markdown / streamdown) drop data: URLs.
+	imageDeliveryInline
+)
+
+func cursorImageDelivery() imageDelivery {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(imageDeliveryEnv))) {
+	case "base64", "inline", "data":
+		return imageDeliveryInline
+	case "path", "relative":
+		return imageDeliveryPath
+	default:
+		return imageDeliveryLink
+	}
+}
+
+// cursorImageURLs renders a run's generated images and returns one URL per
+// image, in order. The default is a hosted link because chat clients sanitise
+// assistant markdown before rendering it and the common sanitisers reject
+// data: URLs outright, which is what surfaces as "[Image blocked: …]"; a
+// deployment that must not name its origin selects another delivery mode.
 // Without a known origin there is nothing to link to, so the data URL stands.
 func cursorImageURLs(baseURL string, images []cursorlib.GeneratedImage) []string {
 	if len(images) == 0 {
 		return nil
 	}
+	mode := cursorImageDelivery()
 	urls := make([]string, len(images))
 	for i, img := range images {
-		urls[i] = img.DataURL()
-		if baseURL == "" {
+		urls[i] = img.InlineDataURL()
+		if mode == imageDeliveryInline {
 			continue
 		}
-		if hosted := cursorlib.PublishGeneratedImage(img); hosted != "" {
+		hosted := cursorlib.PublishGeneratedImage(img)
+		if hosted == "" {
+			continue
+		}
+		if mode == imageDeliveryPath {
+			urls[i] = hosted
+			continue
+		}
+		if baseURL != "" {
 			urls[i] = baseURL + hosted
 		}
 	}

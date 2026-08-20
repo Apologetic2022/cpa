@@ -42,6 +42,14 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
   （服务用户 `cliproxy` 没有 home，且 `PrivateTmp=true` 会在重启时清空 /tmp）。
 - 生成图只保留 24 小时：网关自带清理协程，启动时先扫一遍，之后每小时扫一次，
   删掉 `/opt/cli-proxy/image-cache` 里超过一天的文件，不需要 cron 或 systemd timer。
+- 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `base64`：图片直接以
+  data URL 内嵌在回复里，正文不再出现本机地址。超过 512 KB 的图会先压到
+  最长边 1280、JPEG 质量 85 再内嵌，避免几 MB 的 base64 被客户端逐轮回传。
+  另外两个取值：`link`（默认，绝对链接，会写出 `CPA_PUBLIC_BASE_URL`）、
+  `relative`（只给 `/cursor-images/xxx.png`，交给前面的反代拼域名）。
+  注意部分聊天端的 markdown 清洗器（harden-react-markdown / streamdown）
+  会拦 `data:`，显示成 `[Image blocked]`；那类客户端只能用 `link`，
+  并把 `CPA_PUBLIC_BASE_URL` 指到一个自有域名来隐藏源站。
 - 80 端口对 `/cursor-images/` 做 301，把换证书之前发出去的旧链接也导到受信任域名。
 - 续期由 `certbot.timer` 负责，`renewal-hooks/deploy/reload-nginx.sh` 在续期后 reload nginx。
   换成自有域名后，改 drop-in 里的地址 + 新签一张证书即可。
