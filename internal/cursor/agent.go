@@ -395,16 +395,7 @@ func referenceImageDir() string {
 // reference image of a run. The extension is derived from the MIME type so the
 // server can infer the format from the path alone.
 func ReferenceImagePath(index int, mimeType string) string {
-	ext := ".png"
-	switch strings.ToLower(strings.TrimSpace(mimeType)) {
-	case "image/jpeg", "image/jpg":
-		ext = ".jpg"
-	case "image/webp":
-		ext = ".webp"
-	case "image/gif":
-		ext = ".gif"
-	}
-	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, ext))
+	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, imageExtension(mimeType)))
 }
 
 // headlessWorkspaceDirName is the folder the headless workspace and its Cursor

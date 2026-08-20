@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
@@ -508,6 +509,13 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+
+	// Generated images are served without the API-key middleware: the chat
+	// client fetching them is a markdown renderer, not an API caller, and it
+	// sends no credentials. The unguessable name in the URL is the capability.
+	s.engine.GET(cursorlib.PublishedImageRoute, serveGeneratedImage)
+	s.engine.HEAD(cursorlib.PublishedImageRoute, serveGeneratedImage)
+
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -619,6 +627,27 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+// serveGeneratedImage returns an image produced by a provider's server-side
+// image tool. Responses reference it by URL so the client's markdown sanitizer
+// renders it; data: URLs and the provider's own local file paths never survive
+// that sanitizer.
+func serveGeneratedImage(c *gin.Context) {
+	data, mime, ok := cursorlib.LookupPublishedImage(c.Param("name"))
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "private, max-age=3600")
+	c.Header("X-Content-Type-Options", "nosniff")
+	if c.Request != nil && c.Request.Method == http.MethodHead {
+		c.Header("Content-Type", mime)
+		c.Header("Content-Length", strconv.Itoa(len(data)))
+		c.Status(http.StatusOK)
+		return
+	}
+	c.Data(http.StatusOK, mime, data)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
