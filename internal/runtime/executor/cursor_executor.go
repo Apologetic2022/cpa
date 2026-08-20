@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -760,13 +761,18 @@ func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, 
 	results := trailingToolResults(messages)
 	if len(results) > 0 {
 		session, err := cursorlib.DefaultSessionManager().ResolveForToolResults(results)
-		if err != nil {
+		if err == nil {
+			err = session.SubmitToolResults(results)
+		}
+		switch {
+		case err == nil:
+			return session, nil
+		case errors.Is(err, cursorlib.ErrToolSessionLost):
+			log.Debugf("cursor: replaying conversation after lost tool session: %v", err)
+			messages = cursorlib.ReplayMessagesForLostSession(messages, results)
+		default:
 			return nil, err
 		}
-		if err = session.SubmitToolResults(results); err != nil {
-			return nil, err
-		}
-		return session, nil
 	}
 	return cursorlib.StartSession(ctx, creds, model, messages, tools, opts...)
 }

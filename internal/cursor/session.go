@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -341,7 +342,7 @@ func (s *Session) readLoop(ctx context.Context) {
 						}
 					}
 					s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-					_ = s.Close()
+					_ = s.closeWith("upstream_end_stream")
 					return
 				}
 				serverMsg := &agentv1.AgentServerMessage{}
@@ -365,7 +366,7 @@ func (s *Session) readLoop(ctx context.Context) {
 		}
 		if errRead == io.EOF {
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-			_ = s.Close()
+			_ = s.closeWith("upstream_eof")
 			return
 		}
 		if errRead != nil {
@@ -420,9 +421,10 @@ func (s *Session) fail(err error) {
 	case s.errCh <- err:
 	default:
 	}
+	log.Debugf("cursor session failed: id=%s err=%v", s.ID, err)
 	s.emit(StreamEvent{Type: "error", Message: err.Error()})
 	s.emit(StreamEvent{Type: "segment_end", Reason: "error"})
-	_ = s.Close()
+	_ = s.closeWith("stream_error")
 }
 
 // Events returns the live event stream for the current segment consumer.
@@ -440,7 +442,7 @@ func (s *Session) CollectSegment(ctx context.Context) (*ChatResult, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Close()
+			_ = s.closeWith("collect_ctx_done")
 			return nil, ctx.Err()
 		case err := <-s.errCh:
 			if err != nil {
@@ -496,7 +498,7 @@ func (s *Session) IterSegment(ctx context.Context, fn func(StreamEvent) error) e
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Close()
+			_ = s.closeWith("iter_ctx_done")
 			return ctx.Err()
 		case err := <-s.errCh:
 			if err != nil {
@@ -527,14 +529,14 @@ func (s *Session) SubmitToolResults(results []ToolResult) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return fmt.Errorf("cursor: session closed")
+		return fmt.Errorf("%w (session closed)", ErrToolSessionLost)
 	}
 	pending := make([]*pendingExec, 0, len(results))
 	for _, result := range results {
-		item, ok := s.pending[result.ToolCallID]
+		item, ok := s.pending[NormalizeToolCallID(result.ToolCallID)]
 		if !ok {
 			s.mu.Unlock()
-			return fmt.Errorf("cursor: no pending tool call %s", result.ToolCallID)
+			return fmt.Errorf("%w (no pending tool call %s)", ErrToolSessionLost, result.ToolCallID)
 		}
 		pending = append(pending, item)
 	}
@@ -545,11 +547,12 @@ func (s *Session) SubmitToolResults(results []ToolResult) error {
 		if err := s.sendMcpResult(item.request, result); err != nil {
 			return err
 		}
+		key := NormalizeToolCallID(result.ToolCallID)
 		s.mu.Lock()
-		delete(s.pending, result.ToolCallID)
+		delete(s.pending, key)
 		s.mu.Unlock()
 		if s.manager != nil {
-			s.manager.UnbindPending(result.ToolCallID)
+			s.manager.UnbindPending(key)
 		}
 	}
 	s.resumeReading()
@@ -592,16 +595,23 @@ func (s *Session) sendMcpResult(req *agentv1.ExecServerMessage, result ToolResul
 }
 
 // Close tears down the Agent stream.
-func (s *Session) Close() error {
+func (s *Session) Close() error { return s.closeWith("explicit") }
+
+// closeWith records why a session ended. Tool round-trips span several client
+// requests, so a premature close only shows up later as an unknown
+// tool_call_id; the reason is the only way to tell those cases apart.
+func (s *Session) closeWith(reason string) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	pending := len(s.pending)
 	stream := s.stream
 	cancel := s.cancel
 	s.mu.Unlock()
+	log.Debugf("cursor session close: id=%s reason=%s pending_tools=%d", s.ID, reason, pending)
 	if cancel != nil {
 		cancel()
 	}
@@ -651,7 +661,7 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			}
 			s.emit(ev)
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
-			go func() { _ = s.Close() }()
+			go func() { _ = s.closeWith("turn_ended") }()
 		case *agentv1.InteractionUpdate_ToolCallCompleted:
 			if gen := u.ToolCallCompleted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
 				log.Debugf("cursor genimage completed: result=%T err=%q", gen.GetResult().GetResult(), gen.GetResult().GetError().GetError())
@@ -1007,7 +1017,7 @@ func (s *Session) handleMcpArgs(req *agentv1.ExecServerMessage, args *agentv1.Mc
 		}
 		return false, s.replyMcp(req, result)
 	}
-	callID := strings.TrimSpace(args.GetToolCallId())
+	callID := NormalizeToolCallID(args.GetToolCallId())
 	if callID == "" {
 		callID = uuid.NewString()
 	}
@@ -1023,6 +1033,7 @@ func (s *Session) handleMcpArgs(req *agentv1.ExecServerMessage, args *agentv1.Mc
 	if s.manager != nil {
 		s.manager.BindPending(callID, s)
 	}
+	log.Debugf("cursor client tool call: session=%s tool=%s call_id=%s", s.ID, def.Name, callID)
 	s.emit(StreamEvent{Type: "tool_call", ToolCall: &call})
 	return true, nil
 }
@@ -1133,13 +1144,18 @@ func RunChat(ctx context.Context, creds AccountCredentials, model string, messag
 	results := extractToolResults(messages)
 	if len(results) > 0 {
 		session, err := DefaultSessionManager().ResolveForToolResults(results)
-		if err != nil {
+		if err == nil {
+			err = session.SubmitToolResults(results)
+		}
+		switch {
+		case err == nil:
+			return session.CollectSegment(ctx)
+		case errors.Is(err, ErrToolSessionLost):
+			log.Debugf("cursor: replaying conversation after lost tool session: %v", err)
+			messages = ReplayMessagesForLostSession(messages, results)
+		default:
 			return nil, err
 		}
-		if err = session.SubmitToolResults(results); err != nil {
-			return nil, err
-		}
-		return session.CollectSegment(ctx)
 	}
 	session, err := StartSession(ctx, creds, model, messages, tools, opts...)
 	if err != nil {
