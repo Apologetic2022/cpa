@@ -28,12 +28,25 @@
 出图只有两条入口：模型 `image`（`/v1/chat/completions`、`/v1/messages` 都可以点名
 它），以及 `/v1/images/generations`、`/v1/images/edits`。别的模型一律出不了图。
 
-拦截点在 Agent 协议本身，而不是事后过滤回复：Cursor 的服务端跑 GenerateImage 之前
-会先发一个 interaction query 等客户端批准，只有上面这两条入口开的会话才批准，其余
-会话回 rejected，模型转而用文字作答，也就不会消耗出图额度。万一还是有图送到，非
-image 模型的回复里也会把它丢掉。
+拦截分三层：
 
-模型对外只叫 `image`；以前的 `cursor-image` 不再注册，也不会出现在 `/v1/models` 里。
+1. Cursor 发 interaction query 要客户端批准 GenerateImage 时，非出图会话回
+   rejected。
+2. 非出图会话的 run request 里直接告诉模型这轮不能出图。
+3. 真送来了图也丢掉，回复里换成一句"这个模型不能出图，请用 `image`"。
+
+第 3 层是唯一保证生效的：实测 Cursor 的服务端**不总是**先问客户端，`grok-4.6` 上
+GenerateImage 会直接跑完并返回 success（日志里 `cursor genimage completed`），前两层
+都拦不住。换句话说，上游那次生成的额度仍会被消耗，但调用方拿不到图。MVP proto 里
+`AgentRunRequest` 也没有关掉这个内建工具的开关（试过 `client_supports_inline_images
+=false`，照样会生成），所以只能到这一步。
+
+模型自己经常声称"已生成"，所以回复里那句提示是必要的：否则用户只会看到一段说图已
+经出好了的文字，外加一个指向 Cursor 侧工作区、根本打不开的本地路径（这个死链接现在
+也会被剥掉）。
+
+模型对外只叫 `image`；以前的 `cursor-image` 不再注册，`/v1/models` 里没有它，点名它
+会被当成未知模型拒掉。
 
 ## 生成图片的对外地址
 
