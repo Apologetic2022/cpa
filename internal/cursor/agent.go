@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -333,10 +335,80 @@ func sendExecStreamClose(stream *BidiStream, id uint32) error {
 	return stream.WriteEnvelope(payload, false)
 }
 
+// headlessWorkspaceEnv returns a minimal environment describing a real
+// workspace/project directory. Server-side tools such as GenerateImage refuse
+// to run without one ("needs a workspace/project folder"), so a headless
+// client must still advertise concrete paths even though it never writes the
+// files itself (the image is returned inline as base64).
+func headlessWorkspaceEnv() *agentv1.RequestContextEnv {
+	root, project := headlessWorkspaceRoot()
+	artifacts := filepath.Join(project, "assets")
+	transcripts := filepath.Join(project, "transcripts")
+	terminals := filepath.Join(project, "terminals")
+	tz := "UTC"
+	return &agentv1.RequestContextEnv{
+		OsVersion:              DesktopClientOS(),
+		WorkspacePaths:         []string{root},
+		Shell:                  "/bin/bash",
+		TerminalsFolder:        terminals,
+		TimeZone:               tz,
+		ProjectFolder:          project,
+		AgentTranscriptsFolder: transcripts,
+		ArtifactsFolder:        &artifacts,
+	}
+}
+
+// headlessWorkspaceRoot creates and returns a stable per-process workspace root
+// plus the ~/.cursor/projects/<slug> project folder Cursor expects. The Agent
+// treats these as an open folder so server-side tools (GenerateImage) have a
+// valid destination; the image itself is still returned inline as base64.
+func headlessWorkspaceRoot() (root, project string) {
+	base := os.TempDir()
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		base = home
+	}
+	root = filepath.Join(base, "cliproxy-cursor-workspace")
+	project = filepath.Join(base, ".cursor", "projects", "cliproxy-cursor-workspace")
+	for _, dir := range []string{
+		root,
+		filepath.Join(root, "assets"),
+		project,
+		filepath.Join(project, "assets"),
+		filepath.Join(project, "transcripts"),
+		filepath.Join(project, "terminals"),
+	} {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	return root, project
+}
+
+// writeHeadlessWorkspaceFile persists server-delivered file bytes (e.g. the
+// GenerateImage PNG) when the target lies inside the headless workspace or
+// project folder. Failures are ignored: the bytes are returned inline anyway.
+func writeHeadlessWorkspaceFile(path string, data []byte) {
+	if strings.TrimSpace(path) == "" || len(data) == 0 {
+		return
+	}
+	root, project := headlessWorkspaceRoot()
+	cleaned := filepath.Clean(path)
+	inside := func(base string) bool {
+		rel, err := filepath.Rel(base, cleaned)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	if !inside(root) && !inside(project) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(cleaned, data, 0o644)
+}
+
 func headlessRequestContext() *agentv1.RequestContext {
 	trueVal := true
 	falseVal := false
 	ctx := &agentv1.RequestContext{
+		Env:                         headlessWorkspaceEnv(),
 		EnvInfoComplete:             &trueVal,
 		RulesInfoComplete:           &trueVal,
 		RepositoryInfoComplete:      &trueVal,

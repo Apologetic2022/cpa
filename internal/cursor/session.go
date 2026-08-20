@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	agentv1 "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/agent/v1"
+	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -100,6 +101,11 @@ type Session struct {
 	cancel       context.CancelFunc
 	lastActivity time.Time
 	manager      *SessionManager
+
+	// writtenImages holds image bytes delivered by write_args execs, keyed by
+	// file path. GenerateImage completions reference these when the completed
+	// tool call does not embed image_data itself.
+	writtenImages map[string][]byte
 }
 
 // ChatResult is the collected text response from one Agent segment / run.
@@ -564,6 +570,11 @@ func (s *Session) Close() error {
 func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseForTools bool, err error) {
 	switch m := msg.Message.(type) {
 	case *agentv1.AgentServerMessage_InteractionUpdate:
+		if m.InteractionUpdate.Message == nil {
+			if unknown := m.InteractionUpdate.ProtoReflect().GetUnknown(); len(unknown) > 0 {
+				log.Warnf("cursor iu unknown-variant bytes: %x", unknown)
+			}
+		}
 		switch u := m.InteractionUpdate.Message.(type) {
 		case *agentv1.InteractionUpdate_TextDelta:
 			s.emit(StreamEvent{Type: "text_delta", Text: u.TextDelta.GetText()})
@@ -600,9 +611,21 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 			go func() { _ = s.Close() }()
 		case *agentv1.InteractionUpdate_ToolCallCompleted:
+			if tc := u.ToolCallCompleted.GetToolCall(); tc != nil {
+				log.Warnf("cursor tool_call_completed: tool=%T callId=%s", tc.GetTool(), u.ToolCallCompleted.GetCallId())
+				if gen := tc.GetGenerateImageToolCall(); gen != nil {
+					log.Warnf("cursor genimage completed: args_desc=%q args_path=%q result=%T errstr=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath(), gen.GetResult().GetResult(), gen.GetResult().GetError().GetError())
+				}
+			}
 			s.handleToolCallCompleted(u.ToolCallCompleted)
-		case *agentv1.InteractionUpdate_ToolCallStarted,
-			*agentv1.InteractionUpdate_PartialToolCall:
+		case *agentv1.InteractionUpdate_ToolCallStarted:
+			if tc := u.ToolCallStarted.GetToolCall(); tc != nil {
+				log.Warnf("cursor tool_call_started: tool=%T callId=%s", tc.GetTool(), u.ToolCallStarted.GetCallId())
+				if gen := tc.GetGenerateImageToolCall(); gen != nil {
+					log.Warnf("cursor genimage started: args_desc=%q args_path=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath())
+				}
+			}
+		case *agentv1.InteractionUpdate_PartialToolCall:
 			// Client-visible tool calls are driven by Exec mcp_args for declared tools.
 		}
 	case *agentv1.AgentServerMessage_KvServerMessage:
@@ -621,7 +644,8 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 
 // handleToolCallCompleted surfaces server-side tool results the proxy cares
 // about. Today that is only GenerateImage: Cursor's backend renders the image
-// and returns it as base64 on the completed tool call.
+// and either embeds it as base64 on the completed tool call or delivers the
+// bytes beforehand through a write_args exec (stashed in writtenImages).
 func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdate) {
 	if update == nil {
 		return
@@ -634,19 +658,48 @@ func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdat
 	if result == nil {
 		return
 	}
+	requestedPath := strings.TrimSpace(gen.GetArgs().GetFilePath())
 	if genErr := result.GetError(); genErr != nil {
+		// The PNG may already have arrived via write_args even when the
+		// completion reports an error; prefer delivering the image.
+		if raw := s.takeWrittenImage(requestedPath); len(raw) > 0 {
+			s.emitRawImage(raw, requestedPath)
+			return
+		}
 		s.emit(StreamEvent{Type: "image", Message: genErr.GetError()})
 		return
 	}
 	success := result.GetSuccess()
-	if success == nil || strings.TrimSpace(success.GetImageData()) == "" {
+	if success == nil {
 		return
 	}
+	filePath := strings.TrimSpace(success.GetFilePath())
 	data := strings.TrimSpace(success.GetImageData())
+	if data == "" {
+		raw := s.takeWrittenImage(filePath)
+		if len(raw) == 0 {
+			return
+		}
+		s.emitRawImage(raw, filePath)
+		return
+	}
 	s.emit(StreamEvent{Type: "image", Image: &GeneratedImage{
 		Base64:   data,
 		MimeType: sniffImageMimeType(data),
 		FilePath: success.GetFilePath(),
+	}})
+}
+
+// emitRawImage emits an image event from raw (non-base64) bytes.
+func (s *Session) emitRawImage(raw []byte, filePath string) {
+	mime := http.DetectContentType(raw)
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/png"
+	}
+	s.emit(StreamEvent{Type: "image", Image: &GeneratedImage{
+		Base64:   base64.StdEncoding.EncodeToString(raw),
+		MimeType: mime,
+		FilePath: filePath,
 	}})
 }
 
@@ -715,7 +768,12 @@ func sniffImageMimeType(b64 string) string {
 func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
 	switch m := req.Message.(type) {
 	case nil:
+		if unknown := req.ProtoReflect().GetUnknown(); len(unknown) > 0 {
+			log.Warnf("cursor exec: nil-variant with unknown field bytes: %x", unknown)
+		}
 		return false, sendExecStreamClose(s.stream, req.Id)
+	case *agentv1.ExecServerMessage_WriteArgs:
+		return false, s.handleWriteArgs(req, m.WriteArgs)
 	case *agentv1.ExecServerMessage_RequestContextArgs:
 		result := &agentv1.RequestContextResult{
 			Result: &agentv1.RequestContextResult_Success{
@@ -745,7 +803,78 @@ func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
 	case *agentv1.ExecServerMessage_McpArgs:
 		return s.handleMcpArgs(req, m.McpArgs)
 	}
+	if unknown := req.ProtoReflect().GetUnknown(); len(unknown) > 0 {
+		log.Warnf("cursor exec: unhandled variant, unknown field bytes: %x", unknown)
+	}
 	return false, rejectUnsupportedExec(s.stream, req)
+}
+
+// handleWriteArgs services the write exec Cursor uses to deliver server-side
+// tool output (GenerateImage sends the rendered PNG as file_bytes). The bytes
+// are kept in memory for the tool-call completion and also written to disk
+// when the target stays inside the headless workspace.
+func (s *Session) handleWriteArgs(req *agentv1.ExecServerMessage, args *agentv1.WriteArgs) error {
+	path := strings.TrimSpace(args.GetPath())
+	data := args.GetFileBytes()
+	if len(data) == 0 && args.GetFileText() != "" {
+		data = []byte(args.GetFileText())
+	}
+	if path != "" && len(data) > 0 && strings.HasPrefix(http.DetectContentType(data), "image/") {
+		s.mu.Lock()
+		if s.writtenImages == nil {
+			s.writtenImages = map[string][]byte{}
+		}
+		s.writtenImages[path] = data
+		s.mu.Unlock()
+	}
+	writeHeadlessWorkspaceFile(path, data)
+
+	result := &agentv1.WriteResult{
+		Result: &agentv1.WriteResult_Success{
+			Success: &agentv1.WriteSuccess{
+				Path:     path,
+				FileSize: int32(len(data)),
+			},
+		},
+	}
+	execClient := &agentv1.ExecClientMessage{
+		Id:      req.Id,
+		ExecId:  req.ExecId,
+		Message: &agentv1.ExecClientMessage_WriteResult{WriteResult: result},
+	}
+	client := &agentv1.AgentClientMessage{
+		Message: &agentv1.AgentClientMessage_ExecClientMessage{ExecClientMessage: execClient},
+	}
+	payload, err := proto.Marshal(client)
+	if err != nil {
+		return err
+	}
+	if err = s.stream.WriteEnvelope(payload, false); err != nil {
+		return err
+	}
+	return sendExecStreamClose(s.stream, req.Id)
+}
+
+// takeWrittenImage removes and returns stashed write_args image bytes. An
+// empty path returns any stashed image (single-image runs do not always echo
+// the exact path back on completion).
+func (s *Session) takeWrittenImage(path string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.writtenImages) == 0 {
+		return nil
+	}
+	if path != "" {
+		if data, ok := s.writtenImages[path]; ok {
+			delete(s.writtenImages, path)
+			return data
+		}
+	}
+	for p, data := range s.writtenImages {
+		delete(s.writtenImages, p)
+		return data
+	}
+	return nil
 }
 
 func (s *Session) handleMcpArgs(req *agentv1.ExecServerMessage, args *agentv1.McpArgs) (bool, error) {

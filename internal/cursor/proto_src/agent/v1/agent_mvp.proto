@@ -291,7 +291,24 @@ message KvClientMessage {
 
 message RequestContextArgs {}
 
+// Environment details for system prompt/context. Field numbers match the full
+// Cursor agent.proto RequestContextEnv so the server accepts them. A headless
+// client must provide at least one workspace path plus a project/artifacts
+// folder, otherwise server-side tools like GenerateImage refuse to run because
+// they have nowhere to save their output.
+message RequestContextEnv {
+  string os_version = 1;
+  repeated string workspace_paths = 2;
+  string shell = 3;
+  string terminals_folder = 7;
+  string time_zone = 10;
+  string project_folder = 11;
+  string agent_transcripts_folder = 12;
+  optional string artifacts_folder = 13;
+}
+
 message RequestContext {
+  RequestContextEnv env = 4;
   repeated McpToolDefinition tools = 7;
   optional bool web_search_enabled = 17;
   optional bool web_fetch_enabled = 24;
@@ -308,6 +325,38 @@ message RequestContext {
   optional bool git_status_info_complete = 45;
 }
 
+// Write exec surface. Cursor's server delivers GenerateImage output by asking
+// the client to write the rendered bytes to disk (write_args carries the PNG
+// in file_bytes). Field numbers match the full agent.proto WriteArgs/WriteResult.
+message WriteArgs {
+  string path = 1;
+  string file_text = 2;
+  string tool_call_id = 3;
+  bool return_file_content_after_write = 4;
+  // Raw binary data to write. When set, file_text is ignored.
+  bytes file_bytes = 5;
+  optional string encoding_hint = 6;
+}
+
+message WriteSuccess {
+  string path = 1;
+  int32 lines_created = 2;
+  int32 file_size = 3;
+  optional string file_content_after_write = 4;
+}
+
+message WriteError {
+  string path = 1;
+  string error = 2;
+}
+
+message WriteResult {
+  oneof result {
+    WriteSuccess success = 1;
+    WriteError error = 5;
+  }
+}
+
 message RequestContextSuccess {
   RequestContext request_context = 1;
 }
@@ -322,6 +371,7 @@ message ExecServerMessage {
   uint32 id = 1;
   string exec_id = 15;
   oneof message {
+    WriteArgs write_args = 3;
     RequestContextArgs request_context_args = 10;
     McpArgs mcp_args = 11;
   }
@@ -331,6 +381,7 @@ message ExecClientMessage {
   uint32 id = 1;
   string exec_id = 15;
   oneof message {
+    WriteResult write_result = 3;
     RequestContextResult request_context_result = 10;
     McpResult mcp_result = 11;
   }
