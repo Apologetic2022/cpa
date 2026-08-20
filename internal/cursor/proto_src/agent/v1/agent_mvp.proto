@@ -152,9 +152,41 @@ message McpToolCall {
   McpArgs args = 1;
 }
 
+// GenerateImage tool surface. Cursor's server performs the actual image
+// generation; the client only approves the request and receives the result.
+message GenerateImageArgs {
+  string description = 1;
+  optional string file_path = 2;
+  repeated string reference_image_paths = 5;
+}
+
+message GenerateImageSuccess {
+  // File path where the desktop client would save the image.
+  string file_path = 1;
+  // Base64-encoded image data.
+  string image_data = 2;
+}
+
+message GenerateImageError {
+  string error = 1;
+}
+
+message GenerateImageResult {
+  oneof result {
+    GenerateImageSuccess success = 1;
+    GenerateImageError error = 2;
+  }
+}
+
+message GenerateImageToolCall {
+  GenerateImageArgs args = 1;
+  GenerateImageResult result = 2;
+}
+
 message ToolCall {
   oneof tool {
     McpToolCall mcp_tool_call = 15;
+    GenerateImageToolCall generate_image_tool_call = 28;
   }
   string tool_call_id = 57;
 }
@@ -190,6 +222,41 @@ message InteractionUpdate {
 }
 
 message ClientHeartbeat {}
+
+// Server->client approval request for image generation.
+message GenerateImageRequestQuery {
+  GenerateImageArgs args = 1;
+  string tool_call_id = 2;
+}
+
+message GenerateImageRequestResponse {
+  message Approved {
+    string description = 1;
+  }
+  message Rejected {
+    string reason = 1;
+  }
+  oneof result {
+    Approved approved = 1;
+    Rejected rejected = 2;
+  }
+}
+
+// Bidirectional interaction queries. Only the generate-image branch is
+// decoded by this headless client; other variants stay as unknown fields.
+message InteractionQuery {
+  uint32 id = 1;
+  oneof query {
+    GenerateImageRequestQuery generate_image_request_query = 12;
+  }
+}
+
+message InteractionResponse {
+  uint32 id = 1;
+  oneof result {
+    GenerateImageRequestResponse generate_image_request_response = 12;
+  }
+}
 
 message GetBlobArgs {
   bytes blob_id = 1;
@@ -292,6 +359,7 @@ message AgentClientMessage {
     ExecClientMessage exec_client_message = 2;
     KvClientMessage kv_client_message = 3;
     ExecClientControlMessage exec_client_control_message = 5;
+    InteractionResponse interaction_response = 6;
     ClientHeartbeat client_heartbeat = 7;
   }
 }
@@ -309,6 +377,7 @@ message AgentServerMessage {
     ExecServerMessage exec_server_message = 2;
     ConversationStateStructure conversation_checkpoint_update = 3;
     KvServerMessage kv_server_message = 4;
+    InteractionQuery interaction_query = 7;
     AgentServerMetrics server_metrics = 8;
   }
 }

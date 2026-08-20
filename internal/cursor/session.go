@@ -2,9 +2,11 @@ package cursor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -39,11 +41,31 @@ type ToolResult struct {
 	IsError    bool
 }
 
+// GeneratedImage is one image produced by Cursor's server-side GenerateImage tool.
+type GeneratedImage struct {
+	// Base64 is the raw base64-encoded image payload (no data-URL prefix).
+	Base64 string
+	// MimeType is sniffed from the decoded bytes; defaults to image/png.
+	MimeType string
+	// FilePath is the path the desktop client would have saved the image to.
+	FilePath string
+}
+
+// DataURL renders the image as an inline data URL.
+func (g GeneratedImage) DataURL() string {
+	mime := g.MimeType
+	if mime == "" {
+		mime = "image/png"
+	}
+	return "data:" + mime + ";base64," + g.Base64
+}
+
 // StreamEvent is one Cursor→OpenAI segment event.
 type StreamEvent struct {
 	Type             string
 	Text             string
 	ToolCall         *ToolCall
+	Image            *GeneratedImage
 	Reason           string
 	Message          string
 	InputTokens      int64
@@ -85,6 +107,8 @@ type ChatResult struct {
 	Text             string
 	Thinking         string
 	ToolCalls        []ToolCall
+	Images           []GeneratedImage
+	ImageError       string
 	FinishReason     string
 	ConversationID   string
 	SessionID        string
@@ -384,6 +408,13 @@ func (s *Session) CollectSegment(ctx context.Context) (*ChatResult, error) {
 				if ev.ToolCall != nil {
 					result.ToolCalls = append(result.ToolCalls, *ev.ToolCall)
 				}
+			case "image":
+				if ev.Image != nil {
+					result.Images = append(result.Images, *ev.Image)
+				}
+				if ev.Message != "" {
+					result.ImageError = ev.Message
+				}
 			case "usage_final":
 				result.InputTokens = ev.InputTokens
 				result.OutputTokens = ev.OutputTokens
@@ -568,21 +599,117 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.emit(ev)
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 			go func() { _ = s.Close() }()
+		case *agentv1.InteractionUpdate_ToolCallCompleted:
+			s.handleToolCallCompleted(u.ToolCallCompleted)
 		case *agentv1.InteractionUpdate_ToolCallStarted,
-			*agentv1.InteractionUpdate_PartialToolCall,
-			*agentv1.InteractionUpdate_ToolCallCompleted:
+			*agentv1.InteractionUpdate_PartialToolCall:
 			// Client-visible tool calls are driven by Exec mcp_args for declared tools.
 		}
 	case *agentv1.AgentServerMessage_KvServerMessage:
 		return false, handleKV(s.stream, m.KvServerMessage, s.blobStore)
 	case *agentv1.AgentServerMessage_ExecServerMessage:
 		return s.handleExec(m.ExecServerMessage)
+	case *agentv1.AgentServerMessage_InteractionQuery:
+		return false, s.handleInteractionQuery(m.InteractionQuery)
 	case *agentv1.AgentServerMessage_ConversationCheckpointUpdate:
 		// ignore for MVP
 	case *agentv1.AgentServerMessage_ServerMetrics:
 		// ignore
 	}
 	return false, nil
+}
+
+// handleToolCallCompleted surfaces server-side tool results the proxy cares
+// about. Today that is only GenerateImage: Cursor's backend renders the image
+// and returns it as base64 on the completed tool call.
+func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdate) {
+	if update == nil {
+		return
+	}
+	gen := update.GetToolCall().GetGenerateImageToolCall()
+	if gen == nil {
+		return
+	}
+	result := gen.GetResult()
+	if result == nil {
+		return
+	}
+	if genErr := result.GetError(); genErr != nil {
+		s.emit(StreamEvent{Type: "image", Message: genErr.GetError()})
+		return
+	}
+	success := result.GetSuccess()
+	if success == nil || strings.TrimSpace(success.GetImageData()) == "" {
+		return
+	}
+	data := strings.TrimSpace(success.GetImageData())
+	s.emit(StreamEvent{Type: "image", Image: &GeneratedImage{
+		Base64:   data,
+		MimeType: sniffImageMimeType(data),
+		FilePath: success.GetFilePath(),
+	}})
+}
+
+// handleInteractionQuery auto-approves GenerateImage requests so headless
+// clients never stall on the desktop approval dialog. Other query variants
+// are not decoded by the MVP proto and stay unanswered.
+func (s *Session) handleInteractionQuery(query *agentv1.InteractionQuery) error {
+	client := buildGenerateImageApproval(query)
+	if client == nil {
+		return nil
+	}
+	payload, err := proto.Marshal(client)
+	if err != nil {
+		return err
+	}
+	return s.stream.WriteEnvelope(payload, false)
+}
+
+// buildGenerateImageApproval returns the approval reply for a GenerateImage
+// interaction query, or nil when the query is not an image generation request.
+func buildGenerateImageApproval(query *agentv1.InteractionQuery) *agentv1.AgentClientMessage {
+	if query == nil {
+		return nil
+	}
+	gen := query.GetGenerateImageRequestQuery()
+	if gen == nil {
+		return nil
+	}
+	resp := &agentv1.InteractionResponse{
+		Id: query.GetId(),
+		Result: &agentv1.InteractionResponse_GenerateImageRequestResponse{
+			GenerateImageRequestResponse: &agentv1.GenerateImageRequestResponse{
+				Result: &agentv1.GenerateImageRequestResponse_Approved_{
+					Approved: &agentv1.GenerateImageRequestResponse_Approved{
+						Description: gen.GetArgs().GetDescription(),
+					},
+				},
+			},
+		},
+	}
+	return &agentv1.AgentClientMessage{
+		Message: &agentv1.AgentClientMessage_InteractionResponse{InteractionResponse: resp},
+	}
+}
+
+// sniffImageMimeType inspects base64 image bytes; Cursor does not send an
+// explicit content type with GenerateImage results.
+func sniffImageMimeType(b64 string) string {
+	const fallback = "image/png"
+	sample := b64
+	if len(sample) > 512 {
+		sample = sample[:512]
+	}
+	sample = sample[:len(sample)-len(sample)%4]
+	decoded, err := base64.StdEncoding.DecodeString(sample)
+	if err != nil || len(decoded) == 0 {
+		return fallback
+	}
+	mime := http.DetectContentType(decoded)
+	if !strings.HasPrefix(mime, "image/") {
+		return fallback
+	}
+	return mime
 }
 
 func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
@@ -787,6 +914,48 @@ func RunChat(ctx context.Context, creds AccountCredentials, model string, messag
 	}
 	if result.FinishReason != "tool_calls" {
 		_ = session.Close()
+	}
+	return result, nil
+}
+
+// ImageGenerationAgentModel is the Agent model used to drive the built-in
+// GenerateImage tool when a caller only supplies an image prompt.
+const ImageGenerationAgentModel = "default"
+
+// ImageGenerationInstruction wraps a raw image prompt with an instruction
+// that steers the Agent model into calling the GenerateImage tool.
+func ImageGenerationInstruction(prompt string) string {
+	return "Use your image generation tool to generate exactly one image that matches the description below, then stop. " +
+		"Do not ask clarifying questions and do not write code.\n\nDescription: " + strings.TrimSpace(prompt)
+}
+
+// RunImageGeneration drives one Cursor Agent run whose sole purpose is to
+// produce images via the built-in GenerateImage tool. Cursor's server renders
+// the image after the client auto-approves the interaction query.
+func RunImageGeneration(ctx context.Context, creds AccountCredentials, model string, prompt string) (*ChatResult, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("cursor: image prompt is required")
+	}
+	if strings.TrimSpace(model) == "" {
+		model = ImageGenerationAgentModel
+	}
+	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: ImageGenerationInstruction(prompt)}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Images) == 0 {
+		if strings.TrimSpace(result.ImageError) != "" {
+			return nil, fmt.Errorf("cursor: image generation failed: %s", result.ImageError)
+		}
+		detail := strings.TrimSpace(result.Text)
+		if len(detail) > 300 {
+			detail = detail[:300] + "…"
+		}
+		if detail == "" {
+			detail = "the model did not invoke the image generation tool"
+		}
+		return nil, fmt.Errorf("cursor: no image returned: %s", detail)
 	}
 	return result, nil
 }

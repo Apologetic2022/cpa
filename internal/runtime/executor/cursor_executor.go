@@ -13,6 +13,7 @@ import (
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -22,6 +23,14 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+)
+
+const (
+	// cursorImagesSourceFormat marks requests arriving from the OpenAI
+	// /v1/images endpoints (same convention as the XAI executor).
+	cursorImagesSourceFormat = "openai-image"
+	// cursorImageModelID is the routed model id for Cursor image generation.
+	cursorImageModelID = registry.CursorImageModelID
 )
 
 // CursorExecutor executes chat completions through Cursor's Agent Connect protocol.
@@ -40,6 +49,9 @@ func (e *CursorExecutor) Identifier() string { return "cursor" }
 
 // Execute performs a non-streaming Cursor Agent chat completion.
 func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.SourceFormat.String() == cursorImagesSourceFormat {
+		return e.executeImages(ctx, auth, req, opts)
+	}
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -60,6 +72,10 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if upstreamModel == "" {
 		upstreamModel = "default"
 	}
+	imageChat := strings.EqualFold(baseModel, cursorImageModelID)
+	if imageChat {
+		upstreamModel = cursorlib.ImageGenerationAgentModel
+	}
 	resolved := cursorlib.ResolveRequestedModel(upstreamModel)
 	body, _ = sjson.SetBytes(body, "model", resolved.ModelID)
 
@@ -68,6 +84,12 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	tools := extractTools(body)
+	if imageChat {
+		if messages, err = rewriteImageChatMessages(messages); err != nil {
+			return resp, err
+		}
+		tools = nil
+	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
 	if err != nil {
@@ -97,6 +119,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 // ExecuteStream streams OpenAI-compatible SSE chunks from Cursor Agent events.
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.SourceFormat.String() == cursorImagesSourceFormat {
+		return e.executeImagesStream(ctx, auth, req, opts)
+	}
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -110,6 +135,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if upstreamModel == "" {
 		upstreamModel = "default"
 	}
+	imageChat := strings.EqualFold(baseModel, cursorImageModelID)
+	if imageChat {
+		upstreamModel = cursorlib.ImageGenerationAgentModel
+	}
 	resolved := cursorlib.ResolveRequestedModel(upstreamModel)
 	body, _ = sjson.SetBytes(body, "model", resolved.ModelID)
 
@@ -118,6 +147,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	tools := extractTools(body)
+	if imageChat {
+		if messages, err = rewriteImageChatMessages(messages); err != nil {
+			return nil, err
+		}
+		tools = nil
+	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
 	if err != nil {
@@ -136,6 +171,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		created := time.Now().Unix()
 		var param any
 		toolIndex := 0
+		imageIndex := 0
 		finishReason := "stop"
 		var usageFinal cursorlib.StreamEvent
 
@@ -172,6 +208,20 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				delta = map[string]any{"content": ev.Text}
 			case "thinking_delta":
 				delta = map[string]any{"reasoning_content": ev.Text}
+			case "image":
+				if ev.Image == nil {
+					return nil
+				}
+				delta = map[string]any{
+					"images": []map[string]any{
+						{
+							"index":     imageIndex,
+							"type":      "image_url",
+							"image_url": map[string]any{"url": ev.Image.DataURL()},
+						},
+					},
+				}
+				imageIndex++
 			case "tool_call":
 				if ev.ToolCall == nil {
 					return nil
@@ -272,6 +322,139 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
+}
+
+// executeImages serves OpenAI /v1/images/generations requests by driving the
+// Cursor Agent's built-in GenerateImage tool. Cursor's server performs the
+// actual generation; the proxy auto-approves and returns base64 image data.
+func (e *CursorExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	_ = opts
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	prompt, err := cursorImagesPrompt(req.Payload)
+	if err != nil {
+		return resp, err
+	}
+	creds, err := e.ensureCredentials(ctx, auth)
+	if err != nil {
+		return resp, err
+	}
+	result, err := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt)
+	if err != nil {
+		return resp, err
+	}
+	reporter.Publish(ctx, usage.Detail{
+		InputTokens:     result.InputTokens,
+		OutputTokens:    result.OutputTokens,
+		CachedTokens:    result.CacheReadTokens,
+		CacheReadTokens: result.CacheReadTokens,
+		ReasoningTokens: result.ReasoningTokens,
+		TotalTokens:     result.InputTokens + result.OutputTokens,
+	})
+	resp = cliproxyexecutor.Response{Payload: buildCursorImagesResponse(result.Images)}
+	return resp, nil
+}
+
+// executeImagesStream serves streaming /v1/images requests. Cursor has no
+// partial-image protocol, so the completed image is emitted as one SSE event.
+func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	_ = opts
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	prompt, err := cursorImagesPrompt(req.Payload)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := e.ensureCredentials(ctx, auth)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		result, errRun := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt)
+		if errRun != nil {
+			reporter.PublishFailure(ctx, errRun)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errRun}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		reporter.Publish(ctx, usage.Detail{
+			InputTokens:     result.InputTokens,
+			OutputTokens:    result.OutputTokens,
+			CachedTokens:    result.CacheReadTokens,
+			CacheReadTokens: result.CacheReadTokens,
+			ReasoningTokens: result.ReasoningTokens,
+			TotalTokens:     result.InputTokens + result.OutputTokens,
+		})
+		created := time.Now().Unix()
+		for _, img := range result.Images {
+			data := []byte(`{"type":"image_generation.completed"}`)
+			data, _ = sjson.SetBytes(data, "created", created)
+			data, _ = sjson.SetBytes(data, "b64_json", img.Base64)
+			if img.MimeType != "" {
+				data, _ = sjson.SetBytes(data, "mime_type", img.MimeType)
+			}
+			frame := append([]byte("event: image_generation.completed\ndata: "), data...)
+			frame = append(frame, '\n', '\n')
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
+}
+
+func cursorImagesPrompt(payload []byte) (string, error) {
+	if !gjson.ValidBytes(payload) {
+		return "", fmt.Errorf("cursor: %s requires a JSON body; multipart /v1/images/edits uploads are not supported", cursorImageModelID)
+	}
+	if gjson.GetBytes(payload, "image").Exists() || gjson.GetBytes(payload, "images").Exists() {
+		return "", fmt.Errorf("cursor: %s does not support image edits; use /v1/images/generations", cursorImageModelID)
+	}
+	prompt := strings.TrimSpace(gjson.GetBytes(payload, "prompt").String())
+	if prompt == "" {
+		return "", fmt.Errorf("cursor: images request prompt is required")
+	}
+	return prompt, nil
+}
+
+// buildCursorImagesResponse renders images in the upstream JSON shape the
+// OpenAI images handlers already parse (data[].b64_json / mime_type).
+func buildCursorImagesResponse(images []cursorlib.GeneratedImage) []byte {
+	out := []byte(`{"created":0,"data":[]}`)
+	out, _ = sjson.SetBytes(out, "created", time.Now().Unix())
+	for _, img := range images {
+		item := []byte(`{}`)
+		item, _ = sjson.SetBytes(item, "b64_json", img.Base64)
+		if img.MimeType != "" {
+			item, _ = sjson.SetBytes(item, "mime_type", img.MimeType)
+		}
+		out, _ = sjson.SetRawBytes(out, "data.-1", item)
+	}
+	return out
+}
+
+// rewriteImageChatMessages collapses a chat request against the cursor-image
+// model into a single generation instruction built from the latest user turn.
+func rewriteImageChatMessages(messages []cursorlib.ChatMessage) ([]cursorlib.ChatMessage, error) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			return []cursorlib.ChatMessage{{
+				Role:    "user",
+				Content: cursorlib.ImageGenerationInstruction(messages[i].Content),
+			}}, nil
+		}
+	}
+	return nil, fmt.Errorf("cursor: image generation requires a user prompt message")
 }
 
 func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, model string, messages []cursorlib.ChatMessage, tools []cursorlib.ToolDefinition) (*cursorlib.Session, error) {
@@ -497,6 +680,17 @@ func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byt
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking
+	}
+	if len(result.Images) > 0 {
+		images := make([]map[string]any, 0, len(result.Images))
+		for i, img := range result.Images {
+			images = append(images, map[string]any{
+				"index":     i,
+				"type":      "image_url",
+				"image_url": map[string]any{"url": img.DataURL()},
+			})
+		}
+		message["images"] = images
 	}
 	if len(result.ToolCalls) > 0 {
 		calls := make([]map[string]any, 0, len(result.ToolCalls))
