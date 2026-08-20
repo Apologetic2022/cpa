@@ -75,18 +75,19 @@ func TestCursorImageURLsInlineHidesOrigin(t *testing.T) {
 	}
 }
 
-// Relative delivery keeps the hosted copy but names no host.
+// Relative delivery keeps the hosted copy but names no host, and points at the
+// API namespace so the client resolves it against the base URL it already has.
 func TestCursorImageURLsRelativeOmitsHost(t *testing.T) {
 	t.Setenv(imageDeliveryEnv, "relative")
 	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png"}}
 	urls := cursorImageURLs("https://gw.example.com", imgs)
-	if len(urls) != 1 || !strings.HasPrefix(urls[0], cursorlib.PublishedImagePathPrefix) {
-		t.Fatalf("expected a host-relative path, got %#v", urls)
+	if len(urls) != 1 || !strings.HasPrefix(urls[0], cursorlib.PublishedImageAPIPathPrefix) {
+		t.Fatalf("expected a host-relative API path, got %#v", urls)
 	}
 	if strings.Contains(urls[0], "gw.example.com") {
 		t.Fatalf("relative url leaks the origin: %q", urls[0])
 	}
-	name := strings.TrimPrefix(urls[0], cursorlib.PublishedImagePathPrefix)
+	name := strings.TrimPrefix(urls[0], cursorlib.PublishedImageAPIPathPrefix)
 	if _, _, ok := cursorlib.LookupPublishedImage(name); !ok {
 		t.Fatalf("relative url is not fetchable: %q", urls[0])
 	}

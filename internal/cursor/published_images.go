@@ -25,6 +25,35 @@ const PublishedImagePathPrefix = "/cursor-images/"
 // PublishedImageRoute is the router pattern matching PublishedImagePathPrefix.
 const PublishedImageRoute = PublishedImagePathPrefix + ":name"
 
+// PublishedImageAPIPathPrefix serves the same bytes from inside the API
+// namespace. A reply that names no host has to be fetched by the client
+// against whatever base URL it was configured with, and a path under /v1 is
+// the one shape that survives every proxy sitting in front of this gateway,
+// since that is the only prefix such a proxy is guaranteed to forward.
+const PublishedImageAPIPathPrefix = "/v1/images/"
+
+// PublishedImageAPIRoute is the router pattern matching the API-namespaced
+// prefix.
+const PublishedImageAPIRoute = PublishedImageAPIPathPrefix + ":name"
+
+// PublishedImageName returns the file name in a published image path, or "" if
+// the path does not address a published image. Both prefixes are recognised,
+// and a leading segment is tolerated so a client configured with a base URL
+// that carries a path still resolves the image.
+func PublishedImageName(urlPath string) string {
+	for _, prefix := range []string{PublishedImageAPIPathPrefix, PublishedImagePathPrefix} {
+		idx := strings.Index(urlPath, prefix)
+		if idx < 0 {
+			continue
+		}
+		name := urlPath[idx+len(prefix):]
+		if validPublishedImageName(name) {
+			return name
+		}
+	}
+	return ""
+}
+
 const (
 	// publishedImageTTL bounds how long a hosted image stays fetchable.
 	// Generated images run to several megabytes each, so the cache is kept to

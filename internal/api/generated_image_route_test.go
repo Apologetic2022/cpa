@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"testing"
 
 	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
@@ -39,6 +40,72 @@ func TestGeneratedImageRouteServesWithoutAPIKey(t *testing.T) {
 	}
 	if !bytes.Equal(rr.Body.Bytes(), testGeneratedPNG) {
 		t.Fatalf("served bytes differ from the published image")
+	}
+}
+
+// A reply that names no host is fetched by the client against the base URL it
+// was configured with, so the same bytes have to answer from inside the API
+// namespace — and still without a key, because an <img> sends none.
+func TestGeneratedImageServedFromAPINamespace(t *testing.T) {
+	server := newTestServer(t)
+	name := path.Base(cursorlib.PublishImageBytes(testGeneratedPNG, "image/png"))
+
+	req := httptest.NewRequest(http.MethodGet, cursorlib.PublishedImageAPIPathPrefix+name, nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("unexpected content type %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("a cross-origin renderer cannot read the response: %q", got)
+	}
+	if !bytes.Equal(rr.Body.Bytes(), testGeneratedPNG) {
+		t.Fatalf("served bytes differ from the published image")
+	}
+}
+
+// Some clients join a host-less reference onto a base URL that carries a path
+// of its own. The prefix never reaches this gateway as a route, but the name
+// still identifies the image.
+func TestGeneratedImageServedUnderAClientBasePathPrefix(t *testing.T) {
+	server := newTestServer(t)
+	name := path.Base(cursorlib.PublishImageBytes(testGeneratedPNG, "image/png"))
+
+	for _, requestPath := range []string{
+		"/grok-4.6" + cursorlib.PublishedImageAPIPathPrefix + name,
+		"/some/deep/base" + cursorlib.PublishedImagePathPrefix + name,
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s returned %d: %s", requestPath, rr.Code, rr.Body.String())
+		}
+		if !bytes.Equal(rr.Body.Bytes(), testGeneratedPNG) {
+			t.Fatalf("%s served different bytes", requestPath)
+		}
+	}
+}
+
+func TestUnrelatedPathsStillFourOhFour(t *testing.T) {
+	server := newTestServer(t)
+	for _, requestPath := range []string{
+		"/v1/images/../../etc/passwd",
+		"/cursor-images/",
+		"/v1/images/not-a-published-name",
+		"/totally/unrelated",
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code == http.StatusOK {
+			t.Fatalf("%s unexpectedly served a body: %s", requestPath, rr.Body.String())
+		}
 	}
 }
 

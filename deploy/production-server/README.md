@@ -42,12 +42,18 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
   （服务用户 `cliproxy` 没有 home，且 `PrivateTmp=true` 会在重启时清空 /tmp）。
 - 生成图只保留 24 小时：网关自带清理协程，启动时先扫一遍，之后每小时扫一次，
   删掉 `/opt/cli-proxy/image-cache` 里超过一天的文件，不需要 cron 或 systemd timer。
-- 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `link`：图片以
-  `![](https://…/cursor-images/xxx.png)` 的形式写进正文，地址只出现在图片语法
-  里，渲染出来读者看到的是图本身。要不暴露本机，把 `CPA_PUBLIC_BASE_URL`
-  指到自有域名即可，网关这边不用改。
-  另外两个取值：`base64`（data URL 写进 markdown）、`relative`
-  （只给 `/cursor-images/xxx.png`，交给客户端按自己的 origin 拼）。
+- 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `relative`：正文里是
+  `![](/v1/images/xxx.png)`，不带 scheme 也不带主机名，客户端拿自己填的 API
+  base 去请求，网关把 base64 解码后的原始字节以 `Content-Type: image/png`
+  返回——客户端请求到的就是图片本身。
+  图片路由 `/cursor-images/:name` 和 `/v1/images/:name` 都不走 API key 中间件
+  （`<img>` 不会带凭证），文件名是 128 bit 随机值，URL 本身就是凭证；
+  同时带 `Access-Control-Allow-Origin: *` 和 `Cross-Origin-Resource-Policy:
+  cross-origin`，客户端要 fetch 成 blob 也读得到。
+  另外还有 NoRoute 兜底：客户端 base URL 自带路径前缀时（如
+  `/grok-4.6/v1/images/xxx.png`）照样能取到图。
+  其余取值：`link`（绝对链接，会写出 `CPA_PUBLIC_BASE_URL`，兼容性最好但正文
+  里有地址）、`base64`（data URL 写进 markdown）。
 - 想让图片彻底不带地址，目前没有可行解，两条路都试过并被客户端否掉：
   - markdown 里塞 `data:` —— harden-react-markdown / streamdown 默认
     `allowDataImages=false`，一律换成 `[Image blocked: …]`，跟前缀白名单无关。

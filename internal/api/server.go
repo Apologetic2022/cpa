@@ -513,8 +513,12 @@ func (s *Server) setupRoutes() {
 	// Generated images are served without the API-key middleware: the chat
 	// client fetching them is a markdown renderer, not an API caller, and it
 	// sends no credentials. The unguessable name in the URL is the capability.
+	// The /v1 alias is registered on the engine rather than the authenticated
+	// group for the same reason.
 	s.engine.GET(cursorlib.PublishedImageRoute, serveGeneratedImage)
 	s.engine.HEAD(cursorlib.PublishedImageRoute, serveGeneratedImage)
+	s.engine.GET(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
+	s.engine.HEAD(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
 	cursorlib.StartPublishedImageJanitor()
 
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
@@ -631,17 +635,26 @@ func (s *Server) setupRoutes() {
 }
 
 // serveGeneratedImage returns an image produced by a provider's server-side
-// image tool. Responses reference it by URL so the client's markdown sanitizer
-// renders it; data: URLs and the provider's own local file paths never survive
-// that sanitizer.
+// image tool, decoded, as ordinary image bytes. Responses reference it by URL
+// so the client's markdown sanitizer renders it; data: URLs and the provider's
+// own local file paths never survive that sanitizer.
 func serveGeneratedImage(c *gin.Context) {
-	data, mime, ok := cursorlib.LookupPublishedImage(c.Param("name"))
+	name := c.Param("name")
+	if name == "" && c.Request != nil && c.Request.URL != nil {
+		name = cursorlib.PublishedImageName(c.Request.URL.Path)
+	}
+	data, mime, ok := cursorlib.LookupPublishedImage(name)
 	if !ok {
 		c.Status(http.StatusNotFound)
 		return
 	}
 	c.Header("Cache-Control", "private, max-age=3600")
 	c.Header("X-Content-Type-Options", "nosniff")
+	// The renderer displaying the image lives on a different origin than this
+	// gateway. An <img> tag would not care, but a client that fetches the
+	// bytes itself to build a blob needs both of these to read the response.
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
 	if c.Request != nil && c.Request.Method == http.MethodHead {
 		c.Header("Content-Type", mime)
 		c.Header("Content-Length", strconv.Itoa(len(data)))
@@ -911,6 +924,17 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
+	// A base URL that carries a path of its own turns the reply's host-less
+	// image reference into "/<prefix>/v1/images/<name>", which matches no
+	// route. The name still identifies the image, so serve it rather than
+	// letting the picture break over a prefix the gateway never sees.
+	if method := c.Request.Method; method == http.MethodGet || method == http.MethodHead {
+		if cursorlib.PublishedImageName(path) != "" {
+			serveGeneratedImage(c)
+			c.Abort()
+			return
+		}
+	}
 	if strings.HasPrefix(path, "/v0/resource/plugins/") {
 		s.pluginResourceNoRoute(c)
 		return

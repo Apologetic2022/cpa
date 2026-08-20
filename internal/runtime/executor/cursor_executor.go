@@ -1005,10 +1005,11 @@ const (
 	// imageDeliveryLink points at the gateway with an absolute URL. It renders
 	// everywhere, at the cost of naming the host in the reply.
 	imageDeliveryLink imageDelivery = iota
-	// imageDeliveryPath keeps the hosted copy but emits a host-relative URL,
-	// so the reply names no origin and whatever fronts the gateway resolves
-	// it. Only clients that resolve relative markdown against the API origin
-	// can render this.
+	// imageDeliveryPath keeps the hosted copy but emits a host-relative URL
+	// under the API namespace, so the reply names no origin: the client
+	// fetches it back from the base URL it was already configured with and
+	// gets ordinary image bytes. It renders only in clients that resolve
+	// relative markdown against that base rather than their own app origin.
 	imageDeliveryPath
 	// imageDeliveryInline embeds the bytes as a data: URL in the reply text.
 	// Nothing in the reply identifies the gateway, but markdown sanitisers
@@ -1057,7 +1058,7 @@ func cursorImageURLs(baseURL string, images []cursorlib.GeneratedImage) []string
 			continue
 		}
 		if mode == imageDeliveryPath {
-			urls[i] = hosted
+			urls[i] = cursorlib.PublishedImageAPIPathPrefix + path.Base(hosted)
 			continue
 		}
 		if baseURL != "" {
