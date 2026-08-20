@@ -1,0 +1,19 @@
+[Unit]
+Description=Loopback TCP relay for CLI Proxy upstream HTTP proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/bin/python3 /opt/cli-proxy/bin/local_proxy_relay.py --listen 127.0.0.1 --port 18006 --upstream isp.oxylabs.io --upstream-port 8006
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

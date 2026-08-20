@@ -1,0 +1,15 @@
+[Unit]
+Description=netfilter egress guard for cli-proxy-api (docs 6.6.2 host defense: gateway can never open a non-loopback socket)
+DefaultDependencies=no
+After=local-fs.target systemd-sysusers.service
+Before=cli-proxy-api.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/cli-proxy/bin/egress-guard.sh
+# Removal is manual and explicit: iptables -D OUTPUT -m owner --uid-owner cliproxy ! -o lo -j DROP
+
+[Install]
+WantedBy=multi-user.target

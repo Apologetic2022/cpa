@@ -1,0 +1,17 @@
+{
+  "name": "cli-proxy-relay-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mode-B relay data-plane adapter: drives a real Claude Code binary via Agent SDK streaming-input and speaks the gateway<->instance contract (docs 6.2/6.7).",
+  "main": "adapter.mjs",
+  "scripts": {
+    "start": "node adapter.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
