@@ -223,6 +223,11 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			param.ContentAccumulator.WriteString(content.String())
 		}
 
+		// Handle images produced alongside the text
+		for _, dataURL := range openAIImageDataURLs(delta.Get("images")) {
+			emitImageContentBlock(param, dataURL, &results)
+		}
+
 		// Handle tool calls
 		if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			if param.ToolCallsAccumulator == nil {
@@ -447,6 +452,13 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 			block := []byte(`{"type":"text","text":""}`)
 			block, _ = sjson.SetBytes(block, "text", content.String())
 			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+		}
+
+		// Handle images produced alongside the text
+		for _, dataURL := range openAIImageDataURLs(choice.Get("message.images")) {
+			if block, ok := anthropicImageBlock(dataURL); ok {
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			}
 		}
 
 		// Handle tool calls

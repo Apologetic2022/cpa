@@ -260,14 +260,16 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if ev.Image == nil {
 					return nil
 				}
-				// Put the image in the text too: protocols such as Anthropic
-				// messages carry no image blocks in an assistant reply, so the
-				// markdown link is the only way the caller ever sees it.
+				// Put the image in the text too, unless it is being delivered
+				// as its own content block: a markdown reference is otherwise
+				// the only way the caller ever sees it.
 				url := cursorImageURL(imageBaseURL, *ev.Image)
-				if !emitDelta(map[string]any{
-					"content": "\n\n" + markdownImage(generatedImageAlt, url) + "\n\n",
-				}) {
-					return context.Canceled
+				if textURL := textImageURLs([]string{url})[0]; textURL != "" {
+					if !emitDelta(map[string]any{
+						"content": "\n\n" + markdownImage(generatedImageAlt, textURL) + "\n\n",
+					}) {
+						return context.Canceled
+					}
 				}
 				delta = map[string]any{
 					"images": []map[string]any{
@@ -1010,10 +1012,17 @@ const (
 	// it. Only clients that resolve relative markdown against the API origin
 	// can render this.
 	imageDeliveryPath
-	// imageDeliveryInline embeds the bytes as a data: URL. Nothing in the
-	// reply identifies the gateway, but markdown sanitisers used by some chat
-	// clients (harden-react-markdown / streamdown) drop data: URLs.
+	// imageDeliveryInline embeds the bytes as a data: URL in the reply text.
+	// Nothing in the reply identifies the gateway, but markdown sanitisers
+	// used by some chat clients (harden-react-markdown / streamdown) drop
+	// data: URLs and render "[Image blocked: …]" instead.
 	imageDeliveryInline
+	// imageDeliveryBlock keeps the bytes out of the text entirely and hands
+	// them over through the protocol's own image channel: an Anthropic image
+	// content block, or the images array on an OpenAI message. The client
+	// renders the block by type, so no markdown sanitiser sits in the way and
+	// no address is disclosed.
+	imageDeliveryBlock
 )
 
 func cursorImageDelivery() imageDelivery {
@@ -1022,9 +1031,21 @@ func cursorImageDelivery() imageDelivery {
 		return imageDeliveryInline
 	case "path", "relative":
 		return imageDeliveryPath
+	case "block", "native", "content_block":
+		return imageDeliveryBlock
 	default:
 		return imageDeliveryLink
 	}
+}
+
+// textImageURLs maps delivery URLs onto the reply text. Block delivery renders
+// no image reference at all: an empty URL tells renderGeneratedImages to drop
+// the model's own unusable local path instead of rewriting it.
+func textImageURLs(urls []string) []string {
+	if cursorImageDelivery() != imageDeliveryBlock {
+		return urls
+	}
+	return make([]string, len(urls))
 }
 
 // cursorImageURLs renders a run's generated images and returns one URL per
@@ -1041,7 +1062,7 @@ func cursorImageURLs(baseURL string, images []cursorlib.GeneratedImage) []string
 	urls := make([]string, len(images))
 	for i, img := range images {
 		urls[i] = img.InlineDataURL()
-		if mode == imageDeliveryInline {
+		if mode == imageDeliveryInline || mode == imageDeliveryBlock {
 			continue
 		}
 		hosted := cursorlib.PublishGeneratedImage(img)
@@ -1086,6 +1107,8 @@ func cursorPublicBaseURL(opts cliproxyexecutor.Options) string {
 // every reference to such a path is replaced by a markdown image pointing at
 // the hosted copy. References are matched to images by file name and fall back
 // to arrival order; anything outside the advertised workspace is left alone.
+// An empty URL means the image travels outside the text — the dead reference
+// is then removed rather than rewritten.
 func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls []string) string {
 	if len(images) == 0 || len(urls) != len(images) {
 		return text
@@ -1123,6 +1146,9 @@ func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls 
 		if !ok {
 			return ref
 		}
+		if url == "" {
+			return ""
+		}
 		return markdownImage(groups[1], url)
 	})
 	out = imgSrcPattern.ReplaceAllStringFunc(out, func(tag string) string {
@@ -1131,12 +1157,15 @@ func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls 
 		if !ok {
 			return tag
 		}
+		if url == "" {
+			return ""
+		}
 		return markdownImage(imgTagAlt(tag), url)
 	})
 
 	var appended strings.Builder
 	for i := range images {
-		if used[i] {
+		if used[i] || urls[i] == "" {
 			continue
 		}
 		appended.WriteString("\n\n")
@@ -1290,7 +1319,7 @@ func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult, image
 	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": renderGeneratedImages(result.Text, result.Images, imageURLs),
+		"content": renderGeneratedImages(result.Text, result.Images, textImageURLs(imageURLs)),
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking
