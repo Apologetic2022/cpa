@@ -23,6 +23,11 @@ type codexKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type cursorKeyWithAuthIndex struct {
+	config.CursorKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -188,6 +193,35 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		}
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  entry,
+			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) cursorKeysWithAuthIndex() []cursorKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]cursorKeyWithAuthIndex, len(h.cfg.CursorKey))
+	for i := range h.cfg.CursorKey {
+		entry := h.cfg.CursorKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("cursor:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = cursorKeyWithAuthIndex{
+			CursorKey: entry,
 			AuthIndex: authIndex,
 		}
 	}
