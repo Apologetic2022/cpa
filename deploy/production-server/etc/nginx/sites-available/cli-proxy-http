@@ -10,10 +10,11 @@ server {
         default_type "text/plain";
     }
 
-    # Links handed out before the trusted certificate existed point at this
-    # host over plain http; send them to the origin every client can validate.
+    # An image link handed out over plain http still has to load: send it to
+    # the origin every client can validate. /v1/images/ is deliberately not
+    # redirected here — POST /v1/images/generations shares that prefix.
     location ^~ /cursor-images/ {
-        return 301 https://15-204-94-214.sslip.io$request_uri;
+        return 301 https://0fcc5ed6.sslip.io$request_uri;
     }
 
     location / {
