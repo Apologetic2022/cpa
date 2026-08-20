@@ -317,6 +317,23 @@ func TestStreamImgFilterDropsTagAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestStreamImgFilterKeepsNonLocalTags(t *testing.T) {
+	// A model quoting HTML must come back byte-for-byte: only tags pointing at
+	// the agent's filesystem are ours to remove.
+	for _, tag := range []string{
+		`<img>`,
+		`<img alt="no src" />`,
+		`<img src="data:image/png;base64,QUJD" />`,
+		`<img src="https://example.com/a.png" />`,
+	} {
+		var f streamImgFilter
+		got := f.Feed("before "+tag+" after") + f.Flush()
+		if want := "before " + tag + " after"; got != want {
+			t.Fatalf("filter altered %q -> %q", want, got)
+		}
+	}
+}
+
 func TestStreamImgFilterPassesPlainText(t *testing.T) {
 	var f streamImgFilter
 	var got strings.Builder
@@ -343,7 +360,7 @@ func TestBuildOpenAIChatCompletionInlinesImageInContent(t *testing.T) {
 		Text:   `here you go<img src="/home/cliproxy/x/cat.png" alt="Generated image" />`,
 		Images: []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result)
+	payload := buildOpenAIChatCompletion("cursor-image", result, true)
 	content := gjson.GetBytes(payload, "choices.0.message.content").String()
 	if strings.Contains(content, "/home/cliproxy") {
 		t.Fatalf("content still points at a nonexistent path: %q", content)
@@ -364,7 +381,7 @@ func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 			{Base64: "QUJD", MimeType: "image/png"},
 		},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result)
+	payload := buildOpenAIChatCompletion("cursor-image", result, true)
 	images := gjson.GetBytes(payload, "choices.0.message.images")
 	if !images.IsArray() || len(images.Array()) != 1 {
 		t.Fatalf("missing images array: %s", payload)

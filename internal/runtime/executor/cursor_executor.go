@@ -114,7 +114,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	outPayload := buildOpenAIChatCompletion(req.Model, result)
+	outPayload := buildOpenAIChatCompletion(req.Model, result, imageChat)
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
 		OutputTokens:    result.OutputTokens,
@@ -235,12 +235,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return emitLine([]byte("data: " + string(chunk)))
 		}
 
+		// Text rewriting is confined to the image model: a general chat turn must
+		// stream back byte-for-byte, including any HTML it happens to quote.
 		var imgFilter streamImgFilter
 		errIter := session.IterSegment(ctx, func(ev cursorlib.StreamEvent) error {
 			var delta map[string]any
 			switch ev.Type {
 			case "text_delta":
-				text := imgFilter.Feed(ev.Text)
+				text := ev.Text
+				if imageChat {
+					text = imgFilter.Feed(text)
+				}
 				if text == "" {
 					return nil
 				}
@@ -254,7 +259,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// Inline the image in the text too: clients that render only
 				// content would otherwise show nothing, since the path Cursor
 				// reports does not exist on a headless relay.
-				if !emitDelta(map[string]any{
+				if imageChat && !emitDelta(map[string]any{
 					"content": `<img src="` + ev.Image.DataURL() + `" alt="Generated image" />`,
 				}) {
 					return context.Canceled
@@ -988,10 +993,23 @@ func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) strin
 // imgOpenPattern locates the start of an <img> tag, case-insensitively.
 var imgOpenPattern = regexp.MustCompile(`(?i)<img`)
 
+// keepImgTag reports whether a complete <img> tag can stay in the streamed
+// text. Only tags pointing at the agent's own filesystem are dropped — those
+// are re-emitted inline from the image event once the bytes are known. A tag
+// without a src, or one the caller can already fetch, is left verbatim so a
+// model quoting HTML is not silently edited.
+func keepImgTag(tag string) bool {
+	groups := imgSrcPattern.FindStringSubmatch(tag)
+	if groups == nil {
+		return true
+	}
+	src := strings.TrimSpace(groups[2])
+	return strings.HasPrefix(src, "data:") || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://")
+}
+
 // streamImgFilter removes the assistant's dangling local-path <img> tags from
-// streamed text. The inline image is re-emitted from the image event instead,
-// once its bytes are actually known. A tag can straddle chunk boundaries, so
-// any tail that could still grow into one is held back.
+// streamed text. A tag can straddle chunk boundaries, so any tail that could
+// still grow into one is held back until it completes.
 type streamImgFilter struct {
 	pending string
 }
@@ -1012,6 +1030,9 @@ func (f *streamImgFilter) Feed(chunk string) string {
 			// Tag still open; keep it buffered until the closing bracket lands.
 			f.pending = rest
 			return out.String()
+		}
+		if tag := rest[:end+1]; keepImgTag(tag) {
+			out.WriteString(tag)
 		}
 		buf = rest[end+1:]
 	}
@@ -1039,15 +1060,22 @@ func (f *streamImgFilter) Flush() string {
 	return buf
 }
 
-func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byte {
+// buildOpenAIChatCompletion renders a finished segment. inlineImages rewrites
+// the assistant's <img> tags to data URLs; it is confined to the image model so
+// a general chat turn is returned byte-for-byte, HTML it quotes included.
+func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult, inlineImages bool) []byte {
 	id := "chatcmpl-" + uuid.NewString()
 	finish := result.FinishReason
 	if finish == "" {
 		finish = "stop"
 	}
+	content := result.Text
+	if inlineImages {
+		content = inlineGeneratedImages(content, result.Images)
+	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": inlineGeneratedImages(result.Text, result.Images),
+		"content": content,
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking
