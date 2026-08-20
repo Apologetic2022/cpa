@@ -112,6 +112,39 @@ func TestExtractChatImageInputsPlainTextIsNoop(t *testing.T) {
 	}
 }
 
+func TestAttachChatImageNoteKeepsConversation(t *testing.T) {
+	messages := []cursorlib.ChatMessage{
+		{Role: "system", Content: "be helpful"},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+		{Role: "user", Content: "把红色圆形改成蓝色\n"},
+	}
+	refs := []cursorlib.ReferenceImage{{Path: "/ws/assets/references/reference-1.png"}}
+
+	got := attachChatImageNote(messages, refs)
+	if len(got) != 4 {
+		t.Fatalf("conversation was reshaped: %#v", got)
+	}
+	last := got[3].Content
+	if !strings.HasPrefix(last, "把红色圆形改成蓝色") {
+		t.Fatalf("prompt lost: %q", last)
+	}
+	if !strings.Contains(last, refs[0].Path) {
+		t.Fatalf("note missing reference path: %q", last)
+	}
+	// Earlier turns must be untouched so history stays faithful.
+	if got[1].Content != "hello" || got[0].Content != "be helpful" {
+		t.Fatalf("earlier turns were rewritten: %#v", got[:2])
+	}
+}
+
+func TestAttachChatImageNoteIsNoopWithoutRefs(t *testing.T) {
+	messages := []cursorlib.ChatMessage{{Role: "user", Content: "just text"}}
+	if got := attachChatImageNote(messages, nil); got[0].Content != "just text" {
+		t.Fatalf("note added without references: %q", got[0].Content)
+	}
+}
+
 func TestExtractChatImageInputsRejectsRemoteURL(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":[
       {"type":"text","text":"edit"},

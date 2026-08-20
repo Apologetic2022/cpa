@@ -1192,6 +1192,30 @@ func ImageEditInstruction(prompt string, refs []ReferenceImage) string {
 		"\n\nRequested change: " + strings.TrimSpace(prompt)
 }
 
+// AttachedImageNote names the caller's inline images for a general chat turn.
+// The Agent run request carries text only, so an attachment cannot ride along
+// with the message: it is materialised at a workspace path whose bytes the read
+// exec serves, and the model is told where to find it. Without the paths spelled
+// out the model reports there is no image in the workspace and gives up.
+func AttachedImageNote(refs []ReferenceImage) string {
+	paths := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if path := strings.TrimSpace(ref.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	noun := "image"
+	if len(paths) > 1 {
+		noun = "images"
+	}
+	return "\n\n[Attached " + noun + "]\nThe user attached the following " + noun +
+		" to this message; they are saved in the workspace at:\n- " + strings.Join(paths, "\n- ") +
+		"\nWhen the request concerns them, pass every relevant path to your image generation tool as a reference image."
+}
+
 // RunImageGeneration drives one Cursor Agent run whose sole purpose is to
 // produce images via the built-in GenerateImage tool. Cursor's server renders
 // the image after the client auto-approves the interaction query. When refs is

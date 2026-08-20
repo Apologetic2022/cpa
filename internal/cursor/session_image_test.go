@@ -287,6 +287,28 @@ func TestImageEditInstructionListsReferencePaths(t *testing.T) {
 	}
 }
 
+func TestAttachedImageNoteListsPaths(t *testing.T) {
+	refs := []ReferenceImage{
+		{Path: "/ws/assets/references/reference-1.png"},
+		{Path: "/ws/assets/references/reference-2.png"},
+	}
+	got := AttachedImageNote(refs)
+	for _, ref := range refs {
+		if !strings.Contains(got, ref.Path) {
+			t.Fatalf("note missing %q: %s", ref.Path, got)
+		}
+	}
+	if !strings.HasPrefix(got, "\n\n") {
+		t.Fatalf("note must append to an existing turn: %q", got)
+	}
+	if AttachedImageNote(nil) != "" {
+		t.Fatal("expected no note without references")
+	}
+	if AttachedImageNote([]ReferenceImage{{Path: "  "}}) != "" {
+		t.Fatal("expected no note for a blank path")
+	}
+}
+
 func TestReferenceImagePathExtension(t *testing.T) {
 	for mime, suffix := range map[string]string{
 		"image/png":  "reference-1.png",

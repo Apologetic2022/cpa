@@ -89,19 +89,21 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	tools := extractTools(body)
+	refs, err := extractChatImageInputs(body)
+	if err != nil {
+		return resp, err
+	}
 	var sessionOpts []cursorlib.SessionOption
 	if imageChat {
-		var refs []cursorlib.ReferenceImage
-		if refs, err = extractChatImageInputs(body); err != nil {
-			return resp, err
-		}
 		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return resp, err
 		}
 		tools = nil
-		if len(refs) > 0 {
-			sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
-		}
+	} else {
+		messages = attachChatImageNote(messages, refs)
+	}
+	if len(refs) > 0 {
+		sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
 	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
@@ -160,19 +162,21 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	tools := extractTools(body)
+	refs, err := extractChatImageInputs(body)
+	if err != nil {
+		return nil, err
+	}
 	var sessionOpts []cursorlib.SessionOption
 	if imageChat {
-		var refs []cursorlib.ReferenceImage
-		if refs, err = extractChatImageInputs(body); err != nil {
-			return nil, err
-		}
 		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return nil, err
 		}
 		tools = nil
-		if len(refs) > 0 {
-			sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
-		}
+	} else {
+		messages = attachChatImageNote(messages, refs)
+	}
+	if len(refs) > 0 {
+		sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
 	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
@@ -689,6 +693,27 @@ func rewriteImageChatMessages(messages []cursorlib.ChatMessage, refs []cursorlib
 		return nil, fmt.Errorf("cursor: image edit requires a text prompt describing the change")
 	}
 	return nil, fmt.Errorf("cursor: image generation requires a user prompt message")
+}
+
+// attachChatImageNote hands a general chat model the workspace paths of the
+// images the caller attached. Any model can drive the image tool, so a turn on
+// grok-4.6 that carries an image is just as much an edit request as one on
+// cursor-image; the difference is that the surrounding conversation must stay
+// intact, so the paths are appended to the latest user turn rather than
+// replacing it.
+func attachChatImageNote(messages []cursorlib.ChatMessage, refs []cursorlib.ReferenceImage) []cursorlib.ChatMessage {
+	note := cursorlib.AttachedImageNote(refs)
+	if note == "" {
+		return messages
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
+		messages[i].Content = strings.TrimRight(messages[i].Content, " \t\r\n") + note
+		return messages
+	}
+	return messages
 }
 
 // extractChatImageInputs collects the inline images attached to the latest user
