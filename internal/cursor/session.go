@@ -570,11 +570,6 @@ func (s *Session) Close() error {
 func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseForTools bool, err error) {
 	switch m := msg.Message.(type) {
 	case *agentv1.AgentServerMessage_InteractionUpdate:
-		if m.InteractionUpdate.Message == nil {
-			if unknown := m.InteractionUpdate.ProtoReflect().GetUnknown(); len(unknown) > 0 {
-				log.Warnf("cursor iu unknown-variant bytes: %x", unknown)
-			}
-		}
 		switch u := m.InteractionUpdate.Message.(type) {
 		case *agentv1.InteractionUpdate_TextDelta:
 			s.emit(StreamEvent{Type: "text_delta", Text: u.TextDelta.GetText()})
@@ -611,19 +606,13 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 			go func() { _ = s.Close() }()
 		case *agentv1.InteractionUpdate_ToolCallCompleted:
-			if tc := u.ToolCallCompleted.GetToolCall(); tc != nil {
-				log.Warnf("cursor tool_call_completed: tool=%T callId=%s", tc.GetTool(), u.ToolCallCompleted.GetCallId())
-				if gen := tc.GetGenerateImageToolCall(); gen != nil {
-					log.Warnf("cursor genimage completed: args_desc=%q args_path=%q result=%T errstr=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath(), gen.GetResult().GetResult(), gen.GetResult().GetError().GetError())
-				}
+			if gen := u.ToolCallCompleted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
+				log.Debugf("cursor genimage completed: result=%T err=%q", gen.GetResult().GetResult(), gen.GetResult().GetError().GetError())
 			}
 			s.handleToolCallCompleted(u.ToolCallCompleted)
 		case *agentv1.InteractionUpdate_ToolCallStarted:
-			if tc := u.ToolCallStarted.GetToolCall(); tc != nil {
-				log.Warnf("cursor tool_call_started: tool=%T callId=%s", tc.GetTool(), u.ToolCallStarted.GetCallId())
-				if gen := tc.GetGenerateImageToolCall(); gen != nil {
-					log.Warnf("cursor genimage started: args_desc=%q args_path=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath())
-				}
+			if gen := u.ToolCallStarted.GetToolCall().GetGenerateImageToolCall(); gen != nil {
+				log.Debugf("cursor genimage started: desc=%q path=%q", gen.GetArgs().GetDescription(), gen.GetArgs().GetFilePath())
 			}
 		case *agentv1.InteractionUpdate_PartialToolCall:
 			// Client-visible tool calls are driven by Exec mcp_args for declared tools.
@@ -769,7 +758,7 @@ func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
 	switch m := req.Message.(type) {
 	case nil:
 		if unknown := req.ProtoReflect().GetUnknown(); len(unknown) > 0 {
-			log.Warnf("cursor exec: nil-variant with unknown field bytes: %x", unknown)
+			log.Warnf("cursor exec: undecoded variant, unknown field bytes (first 64): %x", truncateBytes(unknown, 64))
 		}
 		return false, sendExecStreamClose(s.stream, req.Id)
 	case *agentv1.ExecServerMessage_WriteArgs:
@@ -804,9 +793,16 @@ func (s *Session) handleExec(req *agentv1.ExecServerMessage) (bool, error) {
 		return s.handleMcpArgs(req, m.McpArgs)
 	}
 	if unknown := req.ProtoReflect().GetUnknown(); len(unknown) > 0 {
-		log.Warnf("cursor exec: unhandled variant, unknown field bytes: %x", unknown)
+		log.Warnf("cursor exec: unhandled variant, unknown field bytes (first 64): %x", truncateBytes(unknown, 64))
 	}
 	return false, rejectUnsupportedExec(s.stream, req)
+}
+
+func truncateBytes(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	return b[:n]
 }
 
 // handleWriteArgs services the write exec Cursor uses to deliver server-side
