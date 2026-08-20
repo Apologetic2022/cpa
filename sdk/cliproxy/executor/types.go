@@ -15,6 +15,12 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// RequestBaseURLMetadataKey stores the origin the client reached this proxy on
+// (e.g. "https://gateway.example.com"), derived from the inbound request. It
+// lets an executor hand back URLs the same client can fetch; it is absent for
+// non-HTTP executions.
+const RequestBaseURLMetadataKey = "request_base_url"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
