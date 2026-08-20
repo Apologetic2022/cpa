@@ -486,8 +486,8 @@ func CatalogToModelInfos(models []CatalogModel) []*registry.ModelInfo {
 	seen["default"] = struct{}{}
 	// The image generation pseudo-model is not part of Cursor's catalog; keep
 	// it registered so /v1/images requests keep routing to this provider.
-	out = append(out, registry.CursorImageBuiltinModel())
-	seen[registry.CursorImageModelID] = struct{}{}
+	out = append(out, registry.ImageBuiltinModel())
+	seen[registry.ImageModelID] = struct{}{}
 	for _, model := range models {
 		id := strings.TrimSpace(model.ID)
 		if id == "" {

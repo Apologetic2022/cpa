@@ -14,15 +14,15 @@ import (
 // markdown link the Cursor executor emits to the bytes a /v1/messages caller
 // actually receives.
 
-const generatedImageMarkdown = "![Generated image](https://gw.example.com/cursor-images/0123456789abcdef0123456789abcdef.png)"
+const generatedImageMarkdown = "![Generated image](https://gw.example.com/media/0123456789abcdef0123456789abcdef.png)"
 
 func TestClaudeStreamCarriesGeneratedImageLink(t *testing.T) {
-	const head = `{"id":"chatcmpl_1","model":"cursor-image","created":1,`
-	events := runStream(t, `{"model":"cursor-image","stream":true,"messages":[]}`,
+	const head = `{"id":"chatcmpl_1","model":"image","created":1,`
+	events := runStream(t, `{"model":"image","stream":true,"messages":[]}`,
 		head+`"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
 		head+`"choices":[{"index":0,"delta":{"content":"已经生成一张写实肖像。"},"finish_reason":null}]}`,
 		head+`"choices":[{"index":0,"delta":{"content":"\n\n`+generatedImageMarkdown+`\n\n"},"finish_reason":null}]}`,
-		head+`"choices":[{"index":0,"delta":{"images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/cursor-images/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":null}]}`,
+		head+`"choices":[{"index":0,"delta":{"images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/media/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":null}]}`,
 		head+`"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	)
 
@@ -41,13 +41,13 @@ func TestClaudeStreamCarriesGeneratedImageLink(t *testing.T) {
 }
 
 func TestClaudeNonStreamCarriesGeneratedImageLink(t *testing.T) {
-	payload := `{"id":"chatcmpl-1","object":"chat.completion","model":"cursor-image","choices":[{"index":0,"message":{"role":"assistant","content":"图片如下：\n\n` + generatedImageMarkdown + `","images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/cursor-images/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":"stop"}]}`
+	payload := `{"id":"chatcmpl-1","object":"chat.completion","model":"image","choices":[{"index":0,"message":{"role":"assistant","content":"图片如下：\n\n` + generatedImageMarkdown + `","images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/media/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":"stop"}]}`
 
 	var param any
 	out := ConvertOpenAIResponseToClaudeNonStream(
 		context.Background(),
 		"",
-		[]byte(`{"model":"cursor-image","messages":[]}`),
+		[]byte(`{"model":"image","messages":[]}`),
 		nil,
 		[]byte(payload),
 		&param,

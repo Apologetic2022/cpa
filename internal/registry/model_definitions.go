@@ -87,9 +87,10 @@ func GetCursorModels() []*ModelInfo {
 	return WithCursorBuiltins(cloneModelInfos(getModels().Cursor))
 }
 
-// CursorImageModelID is the routed model id for Cursor Agent image
-// generation on the OpenAI-compatible /v1/images endpoints.
-const CursorImageModelID = "cursor-image"
+// ImageModelID is the routed model id for image generation on the
+// OpenAI-compatible /v1/images endpoints. It is the only model that produces
+// images: every other model answers with text.
+const ImageModelID = "image"
 
 // WithCursorBuiltins injects hard-coded Cursor Agent models that should not
 // disappear when upstream models.json has an empty cursor section.
@@ -98,22 +99,22 @@ func WithCursorBuiltins(models []*ModelInfo) []*ModelInfo {
 		cursorBuiltinModel("default", "Cursor Default", "Cursor Agent default model selector."),
 		cursorBuiltinModel("claude-4.6-sonnet", "Claude 4.6 Sonnet", "Cursor Agent Claude 4.6 Sonnet."),
 		cursorBuiltinModel("gpt-5.4", "GPT-5.4", "Cursor Agent GPT-5.4."),
-		CursorImageBuiltinModel(),
+		ImageBuiltinModel(),
 	)
 }
 
-// CursorImageBuiltinModel describes the Cursor image generation pseudo-model.
-// Its openai-image type routes it through the OpenAI images endpoints.
-func CursorImageBuiltinModel() *ModelInfo {
+// ImageBuiltinModel describes the image generation pseudo-model. Its
+// openai-image type routes it through the OpenAI images endpoints.
+func ImageBuiltinModel() *ModelInfo {
 	return &ModelInfo{
-		ID:          CursorImageModelID,
+		ID:          ImageModelID,
 		Object:      "model",
 		Created:     1740960000,
 		OwnedBy:     "cursor",
 		Type:        OpenAIImageModelType,
-		DisplayName: "Cursor Generate Image",
-		Name:        CursorImageModelID,
-		Description: "Cursor Agent image generation via the built-in GenerateImage tool.",
+		DisplayName: "Generate Image",
+		Name:        ImageModelID,
+		Description: "Image generation model.",
 	}
 }
 

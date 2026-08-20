@@ -36,9 +36,18 @@ const (
 	// cursorImagesSourceFormat marks requests arriving from the OpenAI
 	// /v1/images endpoints (same convention as the XAI executor).
 	cursorImagesSourceFormat = "openai-image"
-	// cursorImageModelID is the routed model id for Cursor image generation.
-	cursorImageModelID = registry.CursorImageModelID
+	// cursorImageModelID is the routed model id for image generation. It is
+	// the only chat model allowed to produce images.
+	cursorImageModelID = registry.ImageModelID
 )
+
+// isImageModel reports whether a chat request may produce images. Only the
+// dedicated image model may: on every other model the Agent's image tool is
+// left unapproved, so an ordinary conversation cannot generate one. The
+// /v1/images endpoints take their own route and are always allowed.
+func isImageModel(baseModel string) bool {
+	return strings.EqualFold(strings.TrimSpace(baseModel), cursorImageModelID)
+}
 
 // CursorExecutor executes chat completions through Cursor's Agent Connect protocol.
 type CursorExecutor struct {
@@ -79,7 +88,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if upstreamModel == "" {
 		upstreamModel = "default"
 	}
-	imageChat := strings.EqualFold(baseModel, cursorImageModelID)
+	imageChat := isImageModel(baseModel)
 	if imageChat {
 		upstreamModel = cursorlib.ImageGenerationAgentModel
 	}
@@ -101,6 +110,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			return resp, err
 		}
 		tools = nil
+		sessionOpts = append(sessionOpts, cursorlib.WithImageGeneration())
 	} else {
 		messages = attachChatImageNote(messages, refs)
 	}
@@ -118,7 +128,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	outPayload := buildOpenAIChatCompletion(req.Model, result, cursorImageURLs(cursorPublicBaseURL(opts), result.Images))
+	// Only the image model renders images; a plain chat drops anything the
+	// Agent may still have produced.
+	generated := result.Images
+	if !imageChat {
+		generated = nil
+	}
+	outPayload := buildOpenAIChatCompletion(req.Model, result, cursorImageURLs(cursorPublicBaseURL(opts), generated))
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
 		OutputTokens:    result.OutputTokens,
@@ -152,7 +168,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if upstreamModel == "" {
 		upstreamModel = "default"
 	}
-	imageChat := strings.EqualFold(baseModel, cursorImageModelID)
+	imageChat := isImageModel(baseModel)
 	if imageChat {
 		upstreamModel = cursorlib.ImageGenerationAgentModel
 	}
@@ -174,6 +190,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, err
 		}
 		tools = nil
+		sessionOpts = append(sessionOpts, cursorlib.WithImageGeneration())
 	} else {
 		messages = attachChatImageNote(messages, refs)
 	}
@@ -242,8 +259,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return emitLine([]byte("data: " + string(chunk)))
 		}
 
-		// Any model can reach the GenerateImage tool, so this is keyed off the
-		// workspace path the tag carries rather than off the requested model.
+		// The filter strips local-path <img> tags the model writes on its own,
+		// which is keyed off the workspace path the tag carries rather than off
+		// the requested model.
 		var imgFilter streamImgFilter
 		errIter := session.IterSegment(ctx, func(ev cursorlib.StreamEvent) error {
 			var delta map[string]any
@@ -257,7 +275,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			case "thinking_delta":
 				delta = map[string]any{"reasoning_content": ev.Text}
 			case "image":
-				if ev.Image == nil {
+				if ev.Image == nil || !imageChat {
 					return nil
 				}
 				// Put the image in the text too: protocols such as Anthropic
@@ -680,7 +698,7 @@ func buildCursorImagesResponse(images []cursorlib.GeneratedImage) []byte {
 	return out
 }
 
-// rewriteImageChatMessages collapses a chat request against the cursor-image
+// rewriteImageChatMessages collapses a chat request against the image
 // model into a single instruction built from the latest user turn. Inline
 // images on that turn make it an edit; without them it is a plain generation.
 func rewriteImageChatMessages(messages []cursorlib.ChatMessage, refs []cursorlib.ReferenceImage) ([]cursorlib.ChatMessage, error) {
@@ -700,10 +718,9 @@ func rewriteImageChatMessages(messages []cursorlib.ChatMessage, refs []cursorlib
 }
 
 // attachChatImageNote hands a general chat model the workspace paths of the
-// images the caller attached. Any model can drive the image tool, so a turn on
-// grok-4.6 that carries an image is just as much an edit request as one on
-// cursor-image; the difference is that the surrounding conversation must stay
-// intact, so the paths are appended to the latest user turn rather than
+// images the caller attached, so it can look at them. Such a turn cannot
+// produce a new image — only the image model may — so the conversation stays
+// intact and the paths are appended to the latest user turn rather than
 // replacing it.
 func attachChatImageNote(messages []cursorlib.ChatMessage, refs []cursorlib.ReferenceImage) []cursorlib.ChatMessage {
 	note := cursorlib.AttachedImageNote(refs)

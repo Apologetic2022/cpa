@@ -2594,14 +2594,14 @@
       "max_completion_tokens": 65536
     },
     {
-      "id": "cursor-image",
+      "id": "image",
       "object": "model",
       "created": 1740960000,
       "owned_by": "cursor",
       "type": "openai-image",
-      "display_name": "Cursor Generate Image",
-      "name": "cursor-image",
-      "description": "Cursor Agent image generation via the built-in GenerateImage tool."
+      "display_name": "Generate Image",
+      "name": "image",
+      "description": "Image generation model."
     }
   ]
 }

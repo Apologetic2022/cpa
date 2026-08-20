@@ -73,7 +73,7 @@ func TestRewriteImageChatMessagesUsesEditInstructionWithRefs(t *testing.T) {
 }
 
 func TestExtractChatImageInputs(t *testing.T) {
-	body := []byte(`{"model":"cursor-image","messages":[
+	body := []byte(`{"model":"image","messages":[
       {"role":"user","content":[{"type":"text","text":"first turn"},
                                 {"type":"image_url","image_url":{"url":"data:image/png;base64,` + testPNGBase64 + `"}}]},
       {"role":"assistant","content":"ok"},
@@ -156,14 +156,14 @@ func TestExtractChatImageInputsRejectsRemoteURL(t *testing.T) {
 }
 
 func TestCursorImagesRequestGeneration(t *testing.T) {
-	prompt, refs, err := cursorImagesRequest([]byte(`{"model":"cursor-image","prompt":"a red fox"}`))
+	prompt, refs, err := cursorImagesRequest([]byte(`{"model":"image","prompt":"a red fox"}`))
 	if err != nil || prompt != "a red fox" {
 		t.Fatalf("prompt = %q err = %v", prompt, err)
 	}
 	if len(refs) != 0 {
 		t.Fatalf("expected no reference images, got %d", len(refs))
 	}
-	if _, _, err = cursorImagesRequest([]byte(`{"model":"cursor-image"}`)); err == nil {
+	if _, _, err = cursorImagesRequest([]byte(`{"model":"image"}`)); err == nil {
 		t.Fatal("expected error for missing prompt")
 	}
 	if _, _, err = cursorImagesRequest([]byte(`not json`)); err == nil {
@@ -172,7 +172,7 @@ func TestCursorImagesRequestGeneration(t *testing.T) {
 }
 
 func TestCursorImagesRequestJSONEdit(t *testing.T) {
-	body := `{"model":"cursor-image","prompt":"make it green","images":[{"image_url":"data:image/png;base64,` + testPNGBase64 + `"}]}`
+	body := `{"model":"image","prompt":"make it green","images":[{"image_url":"data:image/png;base64,` + testPNGBase64 + `"}]}`
 	prompt, refs, err := cursorImagesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +314,7 @@ func TestRenderGeneratedImagesRewritesLocalPathToHostedURL(t *testing.T) {
 	if strings.Contains(got, "data:image/png") {
 		t.Fatalf("data URL leaked into content: %q", got)
 	}
-	if !strings.Contains(got, "!["+"Generated image"+"](https://gw.example.com/cursor-images/") {
+	if !strings.Contains(got, "!["+"Generated image"+"](https://gw.example.com/media/") {
 		t.Fatalf("hosted markdown image missing: %q", got)
 	}
 	if !strings.Contains(got, "已经生成一张写实肖像。") || !strings.Contains(got, "后续可继续调整。") {
@@ -331,7 +331,7 @@ func TestRenderGeneratedImagesRewritesMarkdownLocalPath(t *testing.T) {
 	if strings.Contains(got, "/home/cliproxy") {
 		t.Fatalf("local path survived rewrite: %q", got)
 	}
-	if !strings.Contains(got, "![美女肖像](https://gw.example.com/cursor-images/") {
+	if !strings.Contains(got, "![美女肖像](https://gw.example.com/media/") {
 		t.Fatalf("alt text or hosted URL lost: %q", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestRenderGeneratedImagesAppendsUnreferencedImage(t *testing.T) {
 	if !strings.HasPrefix(got, "图片已成功生成。") {
 		t.Fatalf("prose damaged: %q", got)
 	}
-	if !strings.Contains(got, "![Generated image](https://gw.example.com/cursor-images/") {
+	if !strings.Contains(got, "![Generated image](https://gw.example.com/media/") {
 		t.Fatalf("image not appended for a reply that never referenced it: %q", got)
 	}
 }
@@ -402,10 +402,10 @@ func TestCursorImageURLsFallsBackToDataURLWithoutOrigin(t *testing.T) {
 func TestCursorImageURLsServesHostedBytes(t *testing.T) {
 	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png"}}
 	urls := cursorImageURLs("https://gw.example.com", imgs)
-	if len(urls) != 1 || !strings.HasPrefix(urls[0], "https://gw.example.com/cursor-images/") {
+	if len(urls) != 1 || !strings.HasPrefix(urls[0], "https://gw.example.com/media/") {
 		t.Fatalf("unexpected hosted url: %#v", urls)
 	}
-	name := strings.TrimPrefix(urls[0], "https://gw.example.com/cursor-images/")
+	name := strings.TrimPrefix(urls[0], "https://gw.example.com/media/")
 	data, mime, ok := cursorlib.LookupPublishedImage(name)
 	if !ok {
 		t.Fatalf("hosted image %q is not served back", name)
@@ -544,7 +544,7 @@ func TestBuildOpenAIChatCompletionLinksImageInContent(t *testing.T) {
 		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
 	urls := hostedURLs(t, "https://gw.example.com", result.Images)
-	payload := buildOpenAIChatCompletion("cursor-image", result, urls)
+	payload := buildOpenAIChatCompletion("image", result, urls)
 	content := gjson.GetBytes(payload, "choices.0.message.content").String()
 	if strings.Contains(content, "/home/cliproxy") {
 		t.Fatalf("content still points at a nonexistent path: %q", content)
@@ -565,7 +565,7 @@ func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 			{Base64: "QUJD", MimeType: "image/png"},
 		},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result, cursorImageURLs("", result.Images))
+	payload := buildOpenAIChatCompletion("image", result, cursorImageURLs("", result.Images))
 	images := gjson.GetBytes(payload, "choices.0.message.images")
 	if !images.IsArray() || len(images.Array()) != 1 {
 		t.Fatalf("missing images array: %s", payload)

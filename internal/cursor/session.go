@@ -126,6 +126,13 @@ type Session struct {
 	// workspace on disk. Seeded before the read loop starts and never mutated
 	// afterwards, so reads may outlive a single tool call.
 	referenceImages map[string][]byte
+
+	// allowImages opts this session into server-side image generation. It is
+	// off by default so a plain chat can never spend image quota: the Agent
+	// asks for approval before GenerateImage runs, and an unopted session
+	// rejects that request. Only the image model and the /v1/images endpoints
+	// turn it on.
+	allowImages bool
 }
 
 // ChatResult is the collected text response from one Agent segment / run.
@@ -147,6 +154,13 @@ type ChatResult struct {
 
 // SessionOption customises a session before its read loop starts.
 type SessionOption func(*Session)
+
+// WithImageGeneration allows the Agent to run its built-in GenerateImage tool
+// on this session. Without it the approval request is rejected, so the model
+// falls back to a text answer instead of producing an image.
+func WithImageGeneration() SessionOption {
+	return func(s *Session) { s.allowImages = true }
+}
 
 // WithReferenceImages seeds the input images an image-to-image run serves back
 // over the read exec. It must be applied at construction time: Cursor can ask
@@ -722,6 +736,12 @@ func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdat
 	if gen == nil {
 		return
 	}
+	if !s.allowImages {
+		// The approval was rejected, so anything that still arrives here is
+		// not something the caller asked for; drop it rather than leak an
+		// image into a plain chat.
+		return
+	}
 	result := gen.GetResult()
 	if result == nil {
 		return
@@ -772,10 +792,11 @@ func (s *Session) emitRawImage(raw []byte, filePath string) {
 }
 
 // handleInteractionQuery auto-approves GenerateImage requests so headless
-// clients never stall on the desktop approval dialog. Other query variants
+// clients never stall on the desktop approval dialog. Sessions that were not
+// opened for image generation reject the request instead. Other query variants
 // are not decoded by the MVP proto and stay unanswered.
 func (s *Session) handleInteractionQuery(query *agentv1.InteractionQuery) error {
-	client := buildGenerateImageApproval(query)
+	client := buildGenerateImageDecision(query, s.allowImages)
 	if client == nil {
 		return nil
 	}
@@ -786,9 +807,14 @@ func (s *Session) handleInteractionQuery(query *agentv1.InteractionQuery) error 
 	return s.stream.WriteEnvelope(payload, false)
 }
 
-// buildGenerateImageApproval returns the approval reply for a GenerateImage
-// interaction query, or nil when the query is not an image generation request.
-func buildGenerateImageApproval(query *agentv1.InteractionQuery) *agentv1.AgentClientMessage {
+// ImageGenerationRejectedReason is handed back to the Agent when a session
+// that is not an image session asks to run GenerateImage.
+const ImageGenerationRejectedReason = "Image generation is not available in this conversation. Use the dedicated image model instead."
+
+// buildGenerateImageDecision returns the approval or rejection reply for a
+// GenerateImage interaction query, or nil when the query is not an image
+// generation request.
+func buildGenerateImageDecision(query *agentv1.InteractionQuery, allow bool) *agentv1.AgentClientMessage {
 	if query == nil {
 		return nil
 	}
@@ -796,16 +822,24 @@ func buildGenerateImageApproval(query *agentv1.InteractionQuery) *agentv1.AgentC
 	if gen == nil {
 		return nil
 	}
+	decision := &agentv1.GenerateImageRequestResponse{}
+	if allow {
+		decision.Result = &agentv1.GenerateImageRequestResponse_Approved_{
+			Approved: &agentv1.GenerateImageRequestResponse_Approved{
+				Description: gen.GetArgs().GetDescription(),
+			},
+		}
+	} else {
+		decision.Result = &agentv1.GenerateImageRequestResponse_Rejected_{
+			Rejected: &agentv1.GenerateImageRequestResponse_Rejected{
+				Reason: ImageGenerationRejectedReason,
+			},
+		}
+	}
 	resp := &agentv1.InteractionResponse{
 		Id: query.GetId(),
 		Result: &agentv1.InteractionResponse_GenerateImageRequestResponse{
-			GenerateImageRequestResponse: &agentv1.GenerateImageRequestResponse{
-				Result: &agentv1.GenerateImageRequestResponse_Approved_{
-					Approved: &agentv1.GenerateImageRequestResponse_Approved{
-						Description: gen.GetArgs().GetDescription(),
-					},
-				},
-			},
+			GenerateImageRequestResponse: decision,
 		},
 	}
 	return &agentv1.AgentClientMessage{
@@ -1251,7 +1285,7 @@ func AttachedImageNote(refs []ReferenceImage) string {
 	}
 	return "\n\n[Attached " + noun + "]\nThe user attached the following " + noun +
 		" to this message; they are saved in the workspace at:\n- " + strings.Join(paths, "\n- ") +
-		"\nWhen the request concerns them, pass every relevant path to your image generation tool as a reference image."
+		"\nRead those paths when the request concerns them. Image generation is unavailable in this conversation, so answer with text."
 }
 
 // RunImageGeneration drives one Cursor Agent run whose sole purpose is to
@@ -1276,7 +1310,7 @@ func RunImageGeneration(ctx context.Context, creds AccountCredentials, model str
 		}
 		log.Debugf("cursor image edit: advertising %d reference image(s): %q", len(refs), paths)
 	}
-	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: instruction}}, nil, WithReferenceImages(refs))
+	result, err := RunChat(ctx, creds, model, []ChatMessage{{Role: "user", Content: instruction}}, nil, WithImageGeneration(), WithReferenceImages(refs))
 	if err != nil {
 		return nil, err
 	}

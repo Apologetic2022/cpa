@@ -53,7 +53,7 @@ func TestBuildGenerateImageApproval(t *testing.T) {
 			},
 		},
 	}
-	client := buildGenerateImageApproval(query)
+	client := buildGenerateImageDecision(query, true)
 	if client == nil {
 		t.Fatal("expected approval message")
 	}
@@ -66,13 +66,63 @@ func TestBuildGenerateImageApproval(t *testing.T) {
 		t.Fatalf("unexpected approval payload: %#v", resp)
 	}
 
-	if got := buildGenerateImageApproval(&agentv1.InteractionQuery{Id: 3}); got != nil {
+	if got := buildGenerateImageDecision(&agentv1.InteractionQuery{Id: 3}, true); got != nil {
 		t.Fatalf("expected nil for non-image query, got %#v", got)
 	}
 }
 
-func TestHandleToolCallCompletedEmitsImage(t *testing.T) {
+// A session that was not opened for image generation must turn the request
+// down: that is what keeps a plain chat from spending image quota.
+func TestBuildGenerateImageDecisionRejectsWhenNotAllowed(t *testing.T) {
+	query := &agentv1.InteractionQuery{
+		Id: 9,
+		Query: &agentv1.InteractionQuery_GenerateImageRequestQuery{
+			GenerateImageRequestQuery: &agentv1.GenerateImageRequestQuery{
+				Args: &agentv1.GenerateImageArgs{Description: "a red fox"},
+			},
+		},
+	}
+	resp := buildGenerateImageDecision(query, false).GetInteractionResponse()
+	if resp.GetGenerateImageRequestResponse().GetApproved() != nil {
+		t.Fatal("plain chat approved image generation")
+	}
+	rejected := resp.GetGenerateImageRequestResponse().GetRejected()
+	if rejected == nil || rejected.GetReason() == "" {
+		t.Fatalf("expected a rejection with a reason, got %#v", resp)
+	}
+}
+
+// Even if an image still arrives, a session without the opt-in must not
+// surface it.
+func TestHandleToolCallCompletedDropsImageWhenNotAllowed(t *testing.T) {
 	s := &Session{events: make(chan StreamEvent, 4)}
+	s.handleToolCallCompleted(&agentv1.ToolCallCompletedUpdate{
+		CallId: "call-1",
+		ToolCall: &agentv1.ToolCall{
+			Tool: &agentv1.ToolCall_GenerateImageToolCall{
+				GenerateImageToolCall: &agentv1.GenerateImageToolCall{
+					Args: &agentv1.GenerateImageArgs{Description: "a red fox"},
+					Result: &agentv1.GenerateImageResult{
+						Result: &agentv1.GenerateImageResult_Success{
+							Success: &agentv1.GenerateImageSuccess{
+								FilePath:  "assets/fox.png",
+								ImageData: testPNGBase64,
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	select {
+	case ev := <-s.events:
+		t.Fatalf("image leaked into a plain chat: %#v", ev)
+	default:
+	}
+}
+
+func TestHandleToolCallCompletedEmitsImage(t *testing.T) {
+	s := &Session{events: make(chan StreamEvent, 4), allowImages: true}
 	s.handleToolCallCompleted(&agentv1.ToolCallCompletedUpdate{
 		CallId: "call-1",
 		ToolCall: &agentv1.ToolCall{
@@ -105,7 +155,7 @@ func TestHandleToolCallCompletedEmitsImage(t *testing.T) {
 }
 
 func TestHandleToolCallCompletedEmitsImageError(t *testing.T) {
-	s := &Session{events: make(chan StreamEvent, 4)}
+	s := &Session{events: make(chan StreamEvent, 4), allowImages: true}
 	s.handleToolCallCompleted(&agentv1.ToolCallCompletedUpdate{
 		ToolCall: &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_GenerateImageToolCall{
