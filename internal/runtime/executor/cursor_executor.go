@@ -41,6 +41,11 @@ const (
 	cursorImageModelID = registry.ImageModelID
 )
 
+// imageUnavailableNote replaces the image a conversation was not allowed to
+// produce. Cursor's server sometimes renders one anyway and the model then
+// says it delivered a picture, so the reply has to correct that itself.
+const imageUnavailableNote = "_(This model cannot return images. Ask the `image` model for one.)_"
+
 // isImageModel reports whether a chat request may produce images. Only the
 // dedicated image model may: on every other model the Agent's image tool is
 // left unapproved, so an ordinary conversation cannot generate one. The
@@ -129,10 +134,14 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	// Only the image model renders images; a plain chat drops anything the
-	// Agent may still have produced.
+	// Agent may still have produced and says so, because the model routinely
+	// announces an image it was never able to hand over.
 	generated := result.Images
 	if !imageChat {
 		generated = nil
+		if len(result.Images) > 0 || result.ImageError != "" {
+			result.Text = strings.TrimRight(result.Text, " \t\r\n") + "\n\n" + imageUnavailableNote
+		}
 	}
 	outPayload := buildOpenAIChatCompletion(req.Model, result, cursorImageURLs(cursorPublicBaseURL(opts), generated))
 	reporter.Publish(ctx, usage.Detail{
@@ -259,6 +268,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return emitLine([]byte("data: " + string(chunk)))
 		}
 
+		imageUnavailableNoted := false
 		// The filter strips local-path <img> tags the model writes on its own,
 		// which is keyed off the workspace path the tag carries rather than off
 		// the requested model.
@@ -275,7 +285,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			case "thinking_delta":
 				delta = map[string]any{"reasoning_content": ev.Text}
 			case "image":
-				if ev.Image == nil || !imageChat {
+				if !imageChat {
+					if imageUnavailableNoted {
+						return nil
+					}
+					imageUnavailableNoted = true
+					if !emitDelta(map[string]any{"content": "\n\n" + imageUnavailableNote}) {
+						return context.Canceled
+					}
+					return nil
+				}
+				if ev.Image == nil {
 					return nil
 				}
 				// Put the image in the text too: protocols such as Anthropic

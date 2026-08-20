@@ -738,9 +738,11 @@ func (s *Session) handleToolCallCompleted(update *agentv1.ToolCallCompletedUpdat
 		return
 	}
 	if !s.allowImages {
-		// The approval was rejected, so anything that still arrives here is
-		// not something the caller asked for; drop it rather than leak an
-		// image into a plain chat.
+		// Cursor's server runs the tool without waiting for approval in some
+		// flows, so the image still has to be dropped here. Report the
+		// attempt: the model tends to announce an image it never delivered,
+		// and silence would leave the caller waiting for it.
+		s.emit(StreamEvent{Type: "image", Message: ImageGenerationRejectedReason})
 		return
 	}
 	result := gen.GetResult()

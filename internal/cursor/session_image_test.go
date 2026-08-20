@@ -116,8 +116,14 @@ func TestHandleToolCallCompletedDropsImageWhenNotAllowed(t *testing.T) {
 	})
 	select {
 	case ev := <-s.events:
-		t.Fatalf("image leaked into a plain chat: %#v", ev)
+		if ev.Image != nil {
+			t.Fatalf("image leaked into a plain chat: %#v", ev)
+		}
+		if ev.Message != ImageGenerationRejectedReason {
+			t.Fatalf("the dropped attempt was not reported: %#v", ev)
+		}
 	default:
+		t.Fatal("the dropped attempt was not reported at all")
 	}
 }
 
