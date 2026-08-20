@@ -119,11 +119,19 @@ func storeBlob(store map[string][]byte, data []byte) []byte {
 	return id
 }
 
-func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
+func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
 	model = selection.ModelID
 	blobStore := map[string][]byte{}
 	systemPrompt := "You are a helpful assistant."
+	if !allowImages {
+		// Cursor's server runs GenerateImage without waiting for the client
+		// in some flows, and its result is discarded on a conversation that
+		// may not generate. Saying so up front is what keeps the model from
+		// spending half a minute on an image nobody will receive and then
+		// reporting it as delivered.
+		systemPrompt += " You cannot generate images in this conversation: your image generation tool is unavailable. If the user asks for an image, say so plainly instead of calling the tool or claiming an image was produced."
+	}
 	systemBlob := storeBlob(blobStore, mustJSON(map[string]any{
 		"role":    "system",
 		"content": systemPrompt,

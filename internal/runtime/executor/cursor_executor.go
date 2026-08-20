@@ -1116,7 +1116,10 @@ func cursorPublicBaseURL(opts cliproxyexecutor.Options) string {
 // dead reference is removed rather than rewritten.
 func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls []string) string {
 	if len(images) == 0 || len(urls) != len(images) {
-		return text
+		// Nothing to point the references at. A model that tried to generate
+		// on a conversation that is not allowed to still writes the path it
+		// asked for, and that path renders as a broken image in every client.
+		return stripWorkspaceImageRefs(text)
 	}
 	byName := make(map[string]int, len(images))
 	for i, img := range images {
@@ -1180,6 +1183,28 @@ func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls 
 		return out
 	}
 	return strings.TrimRight(out, " \t\r\n") + appended.String()
+}
+
+// stripWorkspaceImageRefs drops every image reference naming a file in the
+// workspace advertised to the Agent. Those paths exist only on Cursor's side
+// of the relay, so the caller can never load them.
+func stripWorkspaceImageRefs(text string) string {
+	if !strings.Contains(text, "![") && !strings.Contains(strings.ToLower(text), "<img") {
+		return text
+	}
+	out := markdownImagePattern.ReplaceAllStringFunc(text, func(ref string) string {
+		groups := markdownImagePattern.FindStringSubmatch(ref)
+		if cursorlib.IsHeadlessWorkspacePath(strings.TrimSpace(groups[2])) {
+			return ""
+		}
+		return ref
+	})
+	return imgSrcPattern.ReplaceAllStringFunc(out, func(tag string) string {
+		if keepImgTag(tag) {
+			return tag
+		}
+		return ""
+	})
 }
 
 // markdownImage renders an image reference in markdown rather than HTML: chat

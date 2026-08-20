@@ -22,6 +22,41 @@ func TestExtractToolResultsTrailingOnly(t *testing.T) {
 	}
 }
 
+// Cursor's server sometimes runs GenerateImage without asking the client
+// first, so a run that may not generate has to be told up front — otherwise it
+// spends the turn producing an image the caller never receives.
+func TestBuildRunRequestTellsPlainChatsImagesAreUnavailable(t *testing.T) {
+	systemPromptFor := func(allowImages bool) string {
+		_, blobs, _, err := buildRunRequest("default", []ChatMessage{
+			{Role: "user", Content: "draw me a fox"},
+		}, nil, allowImages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, data := range blobs {
+			var payload map[string]any
+			if json.Unmarshal(data, &payload) != nil {
+				continue
+			}
+			if payload["role"] != "system" {
+				continue
+			}
+			if content, ok := payload["content"].(string); ok {
+				return content
+			}
+		}
+		t.Fatal("run request carries no system prompt")
+		return ""
+	}
+
+	if got := systemPromptFor(false); !strings.Contains(got, "cannot generate images") {
+		t.Fatalf("plain chat is not told images are unavailable: %q", got)
+	}
+	if got := systemPromptFor(true); strings.Contains(got, "cannot generate images") {
+		t.Fatalf("the image model was told it cannot generate: %q", got)
+	}
+}
+
 func TestBuildRunRequestIncludesMcpTools(t *testing.T) {
 	msg, _, _, err := buildRunRequest("default", []ChatMessage{
 		{Role: "user", Content: "weather?"},
@@ -29,7 +64,7 @@ func TestBuildRunRequestIncludesMcpTools(t *testing.T) {
 		Name:        "get_weather",
 		Description: "weather",
 		Parameters:  map[string]any{"type": "object"},
-	}})
+	}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +86,7 @@ func TestBuildRunRequestNativeToolJSON(t *testing.T) {
 		}},
 		{Role: "tool", ToolCallID: "c1", Name: "get_weather", Content: `{"ok":true}`},
 		{Role: "user", Content: "again"},
-	}, nil)
+	}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

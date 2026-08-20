@@ -70,7 +70,7 @@ func TestReplayMessagesForLostSessionEndsWithUserTurn(t *testing.T) {
 		t.Fatalf("tool output missing from replay: %q", last.Content)
 	}
 	// buildRunRequest needs the replayed turn to become the active prompt.
-	if _, _, _, err := buildRunRequest("default", replayed, nil); err != nil {
+	if _, _, _, err := buildRunRequest("default", replayed, nil, false); err != nil {
 		t.Fatalf("build run request: %v", err)
 	}
 }

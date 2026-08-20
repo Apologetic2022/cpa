@@ -189,7 +189,15 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		return nil, fmt.Errorf("cursor: access_token is required")
 	}
 	selection := ResolveRequestedModel(model)
-	clientMsg, blobStore, conversationID, err := buildRunRequest(model, messages, tools)
+	// Options are applied before the run request is built: whether the run may
+	// generate images decides what the Agent is told it can do.
+	session := &Session{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(session)
+		}
+	}
+	clientMsg, blobStore, conversationID, err := buildRunRequest(model, messages, tools, session.allowImages)
 	if err != nil {
 		return nil, err
 	}
@@ -222,27 +230,20 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		profile.CookieJar.RememberResponse(creds.BaseURL, stream.ResponseHeader())
 	}
 
-	session := &Session{
-		ID:             uuid.NewString(),
-		ConversationID: conversationID,
-		Model:          selection.ModelID,
-		stream:         stream,
-		blobStore:      blobStore,
-		tools:          append([]ToolDefinition(nil), tools...),
-		toolIndex:      indexTools(tools),
-		pending:        map[string]*pendingExec{},
-		events:         make(chan StreamEvent, 64),
-		errCh:          make(chan error, 1),
-		pauseCh:        make(chan struct{}),
-		cancel:         cancel,
-		lastActivity:   time.Now(),
-		manager:        DefaultSessionManager(),
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(session)
-		}
-	}
+	session.ID = uuid.NewString()
+	session.ConversationID = conversationID
+	session.Model = selection.ModelID
+	session.stream = stream
+	session.blobStore = blobStore
+	session.tools = append([]ToolDefinition(nil), tools...)
+	session.toolIndex = indexTools(tools)
+	session.pending = map[string]*pendingExec{}
+	session.events = make(chan StreamEvent, 64)
+	session.errCh = make(chan error, 1)
+	session.pauseCh = make(chan struct{})
+	session.cancel = cancel
+	session.lastActivity = time.Now()
+	session.manager = DefaultSessionManager()
 	session.manager.Register(session)
 	go session.heartbeatLoop(runCtx)
 	go session.readLoop(runCtx)

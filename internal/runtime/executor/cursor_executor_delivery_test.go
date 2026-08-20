@@ -178,6 +178,31 @@ func TestOnlyTheImageModelMayGenerate(t *testing.T) {
 	}
 }
 
+// A model that tries to generate on a conversation that may not still writes
+// the path it asked Cursor for. Nothing serves that path, so leaving it in
+// would show the reader a broken image.
+func TestRepliesWithoutImagesDropWorkspacePaths(t *testing.T) {
+	const localPath = "/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/portrait.png"
+	for _, text := range []string{
+		`正在生成一张写实风格的美女肖像。<img src="` + localPath + `" alt="Generated image" />`,
+		"成品如下：\n\n![Generated image](" + localPath + ")\n",
+	} {
+		got := renderGeneratedImages(text, nil, nil)
+		if strings.Contains(got, localPath) {
+			t.Fatalf("unreachable local path survived: %q", got)
+		}
+		if !strings.Contains(got, "生成") && !strings.Contains(got, "成品") {
+			t.Fatalf("prose was dropped along with the reference: %q", got)
+		}
+	}
+
+	// A reference to somewhere else is the model quoting, not a dead link.
+	const quoted = `see ![logo](https://example.com/logo.png)`
+	if got := renderGeneratedImages(quoted, nil, nil); got != quoted {
+		t.Fatalf("unrelated image reference was rewritten: %q", got)
+	}
+}
+
 // The link is visible in every reply that carries an image, so no served
 // prefix may name the provider sitting behind this gateway.
 func TestPublishedImagePathNamesNoProvider(t *testing.T) {
