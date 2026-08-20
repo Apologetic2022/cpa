@@ -260,6 +260,103 @@ func TestBuildCursorImagesResponse(t *testing.T) {
 	}
 }
 
+func TestInlineGeneratedImagesRewritesLocalPath(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "/home/cliproxy/.cursor/projects/w/assets/assets/portrait-woman.png"}}
+	text := `已经生成一张写实肖像。<img src="/home/cliproxy/.cursor/projects/w/assets/assets/portrait-woman.png" alt="Generated image" />后续可继续调整。`
+
+	got := inlineGeneratedImages(text, imgs)
+	if strings.Contains(got, "/home/cliproxy") {
+		t.Fatalf("local path survived rewrite: %q", got)
+	}
+	if !strings.Contains(got, `src="data:image/png;base64,QUJD"`) {
+		t.Fatalf("data URL not inlined: %q", got)
+	}
+	// Surrounding prose and other attributes must be preserved.
+	if !strings.Contains(got, "已经生成一张写实肖像。") || !strings.Contains(got, "后续可继续调整。") {
+		t.Fatalf("surrounding text damaged: %q", got)
+	}
+	if !strings.Contains(got, `alt="Generated image"`) {
+		t.Fatalf("alt attribute lost: %q", got)
+	}
+}
+
+func TestInlineGeneratedImagesFallsBackToOrder(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "somewhere-else.png"}}
+	got := inlineGeneratedImages(`<img src="assets/unknown-name.png" />`, imgs)
+	if !strings.Contains(got, "data:image/png;base64,QUJD") {
+		t.Fatalf("expected order fallback, got %q", got)
+	}
+}
+
+func TestInlineGeneratedImagesLeavesAddressableSources(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "a.png"}}
+	for _, src := range []string{"data:image/png;base64,ZZZ", "https://example.com/a.png"} {
+		text := `<img src="` + src + `" />`
+		if got := inlineGeneratedImages(text, imgs); got != text {
+			t.Fatalf("rewrote an already-addressable src %q -> %q", src, got)
+		}
+	}
+	// No images at all must be a no-op rather than a panic.
+	if got := inlineGeneratedImages(`<img src="/x.png" />`, nil); got != `<img src="/x.png" />` {
+		t.Fatalf("unexpected rewrite without images: %q", got)
+	}
+}
+
+func TestStreamImgFilterDropsTagAcrossChunks(t *testing.T) {
+	var f streamImgFilter
+	// The tag is split across five deltas, mid-attribute.
+	chunks := []string{"生成完毕。", `<im`, `g src="/home/cli`, `proxy/a.png" alt="x"`, ` />剩余文本`}
+	var got strings.Builder
+	for _, c := range chunks {
+		got.WriteString(f.Feed(c))
+	}
+	got.WriteString(f.Flush())
+
+	if want := "生成完毕。剩余文本"; got.String() != want {
+		t.Fatalf("filtered text = %q, want %q", got.String(), want)
+	}
+}
+
+func TestStreamImgFilterPassesPlainText(t *testing.T) {
+	var f streamImgFilter
+	var got strings.Builder
+	for _, c := range []string{"a < b", " and ", "c > d"} {
+		got.WriteString(f.Feed(c))
+	}
+	got.WriteString(f.Flush())
+	if want := "a < b and c > d"; got.String() != want {
+		t.Fatalf("plain text mangled: %q, want %q", got.String(), want)
+	}
+}
+
+func TestStreamImgFilterDropsUnterminatedTag(t *testing.T) {
+	var f streamImgFilter
+	out := f.Feed(`done.<img src="/home/cliproxy/a.png"`)
+	out += f.Flush()
+	if out != "done." {
+		t.Fatalf("unterminated tag leaked: %q", out)
+	}
+}
+
+func TestBuildOpenAIChatCompletionInlinesImageInContent(t *testing.T) {
+	result := &cursorlib.ChatResult{
+		Text:   `here you go<img src="/home/cliproxy/x/cat.png" alt="Generated image" />`,
+		Images: []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}},
+	}
+	payload := buildOpenAIChatCompletion("cursor-image", result)
+	content := gjson.GetBytes(payload, "choices.0.message.content").String()
+	if strings.Contains(content, "/home/cliproxy") {
+		t.Fatalf("content still points at a nonexistent path: %q", content)
+	}
+	if !strings.Contains(content, "data:image/png;base64,QUJD") {
+		t.Fatalf("content missing inline image: %q", content)
+	}
+	// The images array stays populated for clients that read it instead.
+	if gjson.GetBytes(payload, "choices.0.message.images.0.image_url.url").String() != "data:image/png;base64,QUJD" {
+		t.Fatalf("images array lost: %s", payload)
+	}
+}
+
 func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 	result := &cursorlib.ChatResult{
 		Text: "here you go",

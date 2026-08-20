@@ -9,6 +9,8 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -220,16 +222,42 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return
 		}
 
+		emitDelta := func(delta map[string]any) bool {
+			chunk, _ := json.Marshal(map[string]any{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   req.Model,
+				"choices": []map[string]any{
+					{"index": 0, "delta": delta, "finish_reason": nil},
+				},
+			})
+			return emitLine([]byte("data: " + string(chunk)))
+		}
+
+		var imgFilter streamImgFilter
 		errIter := session.IterSegment(ctx, func(ev cursorlib.StreamEvent) error {
 			var delta map[string]any
 			switch ev.Type {
 			case "text_delta":
-				delta = map[string]any{"content": ev.Text}
+				text := imgFilter.Feed(ev.Text)
+				if text == "" {
+					return nil
+				}
+				delta = map[string]any{"content": text}
 			case "thinking_delta":
 				delta = map[string]any{"reasoning_content": ev.Text}
 			case "image":
 				if ev.Image == nil {
 					return nil
+				}
+				// Inline the image in the text too: clients that render only
+				// content would otherwise show nothing, since the path Cursor
+				// reports does not exist on a headless relay.
+				if !emitDelta(map[string]any{
+					"content": `<img src="` + ev.Image.DataURL() + `" alt="Generated image" />`,
+				}) {
+					return context.Canceled
 				}
 				delta = map[string]any{
 					"images": []map[string]any{
@@ -287,20 +315,16 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if delta == nil {
 				return nil
 			}
-			chunk, _ := json.Marshal(map[string]any{
-				"id":      completionID,
-				"object":  "chat.completion.chunk",
-				"created": created,
-				"model":   req.Model,
-				"choices": []map[string]any{
-					{"index": 0, "delta": delta, "finish_reason": nil},
-				},
-			})
-			if !emitLine([]byte("data: " + string(chunk))) {
+			if !emitDelta(delta) {
 				return context.Canceled
 			}
 			return nil
 		})
+		if tail := imgFilter.Flush(); tail != "" && errIter == nil {
+			if !emitDelta(map[string]any{"content": tail}) {
+				return
+			}
+		}
 		if errIter != nil {
 			reporter.PublishFailure(ctx, errIter)
 			select {
@@ -922,6 +946,99 @@ func extractTools(body []byte) []cursorlib.ToolDefinition {
 	return out
 }
 
+// imgSrcPattern captures an <img> tag around its src value so the value can be
+// swapped without disturbing the rest of the tag.
+var imgSrcPattern = regexp.MustCompile(`(?is)(<img\b[^>]*?\bsrc=")([^"]*)("[^>]*>)`)
+
+// inlineGeneratedImages rewrites the assistant's <img> tags so the rendered
+// text actually shows the image. Cursor reports the path its desktop client
+// would have saved to, which never exists for a headless relay, so a client
+// that renders the content verbatim gets a broken image. Tags are matched to
+// the run's images by file name and fall back to arrival order.
+func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) string {
+	if text == "" || len(images) == 0 {
+		return text
+	}
+	byName := make(map[string]string, len(images))
+	for _, img := range images {
+		if name := path.Base(strings.TrimSpace(img.FilePath)); name != "" && name != "." && name != "/" {
+			byName[name] = img.DataURL()
+		}
+	}
+	next := 0
+	return imgSrcPattern.ReplaceAllStringFunc(text, func(tag string) string {
+		groups := imgSrcPattern.FindStringSubmatch(tag)
+		src := strings.TrimSpace(groups[2])
+		// Anything already addressable by the caller is left alone.
+		if strings.HasPrefix(src, "data:") || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+			return tag
+		}
+		if url, ok := byName[path.Base(src)]; ok {
+			return groups[1] + url + groups[3]
+		}
+		if next < len(images) {
+			url := images[next].DataURL()
+			next++
+			return groups[1] + url + groups[3]
+		}
+		return tag
+	})
+}
+
+// imgOpenPattern locates the start of an <img> tag, case-insensitively.
+var imgOpenPattern = regexp.MustCompile(`(?i)<img`)
+
+// streamImgFilter removes the assistant's dangling local-path <img> tags from
+// streamed text. The inline image is re-emitted from the image event instead,
+// once its bytes are actually known. A tag can straddle chunk boundaries, so
+// any tail that could still grow into one is held back.
+type streamImgFilter struct {
+	pending string
+}
+
+// Feed absorbs one text delta and returns the part that is safe to emit.
+func (f *streamImgFilter) Feed(chunk string) string {
+	buf := f.pending + chunk
+	var out strings.Builder
+	for {
+		loc := imgOpenPattern.FindStringIndex(buf)
+		if loc == nil {
+			break
+		}
+		out.WriteString(buf[:loc[0]])
+		rest := buf[loc[0]:]
+		end := strings.IndexByte(rest, '>')
+		if end < 0 {
+			// Tag still open; keep it buffered until the closing bracket lands.
+			f.pending = rest
+			return out.String()
+		}
+		buf = rest[end+1:]
+	}
+	// No tag in flight: hold back only a tail that could begin one.
+	hold := 0
+	for n := 4; n > 0; n-- {
+		if len(buf) >= n && strings.EqualFold(buf[len(buf)-n:], "<img"[:n]) {
+			hold = n
+			break
+		}
+	}
+	out.WriteString(buf[:len(buf)-hold])
+	f.pending = buf[len(buf)-hold:]
+	return out.String()
+}
+
+// Flush returns any buffered text at end of stream, dropping a tag that never
+// closed rather than leaking a broken path to the caller.
+func (f *streamImgFilter) Flush() string {
+	buf := f.pending
+	f.pending = ""
+	if loc := imgOpenPattern.FindStringIndex(buf); loc != nil {
+		return buf[:loc[0]]
+	}
+	return buf
+}
+
 func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byte {
 	id := "chatcmpl-" + uuid.NewString()
 	finish := result.FinishReason
@@ -930,7 +1047,7 @@ func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byt
 	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": result.Text,
+		"content": inlineGeneratedImages(result.Text, result.Images),
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking
