@@ -17,8 +17,8 @@ import (
 const generatedImageMarkdown = "![Generated image](https://gw.example.com/media/0123456789abcdef0123456789abcdef.png)"
 
 func TestClaudeStreamCarriesGeneratedImageLink(t *testing.T) {
-	const head = `{"id":"chatcmpl_1","model":"image","created":1,`
-	events := runStream(t, `{"model":"image","stream":true,"messages":[]}`,
+	const head = `{"id":"chatcmpl_1","model":"nano-banana-pro","created":1,`
+	events := runStream(t, `{"model":"nano-banana-pro","stream":true,"messages":[]}`,
 		head+`"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
 		head+`"choices":[{"index":0,"delta":{"content":"已经生成一张写实肖像。"},"finish_reason":null}]}`,
 		head+`"choices":[{"index":0,"delta":{"content":"\n\n`+generatedImageMarkdown+`\n\n"},"finish_reason":null}]}`,
@@ -41,13 +41,13 @@ func TestClaudeStreamCarriesGeneratedImageLink(t *testing.T) {
 }
 
 func TestClaudeNonStreamCarriesGeneratedImageLink(t *testing.T) {
-	payload := `{"id":"chatcmpl-1","object":"chat.completion","model":"image","choices":[{"index":0,"message":{"role":"assistant","content":"图片如下：\n\n` + generatedImageMarkdown + `","images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/media/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":"stop"}]}`
+	payload := `{"id":"chatcmpl-1","object":"chat.completion","model":"nano-banana-pro","choices":[{"index":0,"message":{"role":"assistant","content":"图片如下：\n\n` + generatedImageMarkdown + `","images":[{"index":0,"type":"image_url","image_url":{"url":"https://gw.example.com/media/0123456789abcdef0123456789abcdef.png"}}]},"finish_reason":"stop"}]}`
 
 	var param any
 	out := ConvertOpenAIResponseToClaudeNonStream(
 		context.Background(),
 		"",
-		[]byte(`{"model":"image","messages":[]}`),
+		[]byte(`{"model":"nano-banana-pro","messages":[]}`),
 		nil,
 		[]byte(payload),
 		&param,

@@ -110,7 +110,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	var sessionOpts []cursorlib.SessionOption
+	longEdge := 0
 	if imageChat {
+		longEdge = cursorlib.RequestedLongEdge(latestUserContent(messages))
 		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return resp, err
 		}
@@ -143,6 +145,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			result.Text = strings.TrimRight(result.Text, " \t\r\n") + "\n\n" + imageUnavailableNote
 		}
 	}
+	cursorlib.UpscaleGeneratedImages(generated, longEdge)
 	outPayload := buildOpenAIChatCompletion(req.Model, result, cursorImageURLs(cursorPublicBaseURL(opts), generated))
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
@@ -194,7 +197,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	var sessionOpts []cursorlib.SessionOption
+	longEdge := 0
 	if imageChat {
+		longEdge = cursorlib.RequestedLongEdge(latestUserContent(messages))
 		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return nil, err
 		}
@@ -301,7 +306,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// Put the image in the text too: protocols such as Anthropic
 				// messages carry no image blocks in an assistant reply, so the
 				// markdown reference is the only way the caller ever sees it.
-				url := cursorImageURL(imageBaseURL, *ev.Image)
+				url := cursorImageURL(imageBaseURL, cursorlib.UpscaleGeneratedImage(*ev.Image, longEdge))
 				if !emitDelta(map[string]any{
 					"content": "\n\n" + markdownImage(generatedImageAlt, url) + "\n\n",
 				}) {
@@ -424,7 +429,7 @@ func (e *CursorExecutor) executeImages(ctx context.Context, auth *cliproxyauth.A
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	prompt, refs, err := cursorImagesRequest(req.Payload)
+	input, err := cursorImagesInput(req.Payload)
 	if err != nil {
 		return resp, err
 	}
@@ -432,10 +437,11 @@ func (e *CursorExecutor) executeImages(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	result, err := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt, refs...)
+	result, err := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, input.prompt, input.refs...)
 	if err != nil {
 		return resp, err
 	}
+	cursorlib.UpscaleGeneratedImages(result.Images, input.longEdge)
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
 		OutputTokens:    result.OutputTokens,
@@ -456,7 +462,7 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	prompt, refs, err := cursorImagesRequest(req.Payload)
+	input, err := cursorImagesInput(req.Payload)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +473,7 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		result, errRun := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt, refs...)
+		result, errRun := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, input.prompt, input.refs...)
 		if errRun != nil {
 			reporter.PublishFailure(ctx, errRun)
 			select {
@@ -476,6 +482,7 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 			}
 			return
 		}
+		cursorlib.UpscaleGeneratedImages(result.Images, input.longEdge)
 		reporter.Publish(ctx, usage.Detail{
 			InputTokens:     result.InputTokens,
 			OutputTokens:    result.OutputTokens,
@@ -513,19 +520,37 @@ const cursorMaxReferenceImages = 4
 // payload. Both the JSON and multipart shapes the OpenAI images handlers
 // produce are accepted; input images turn the run into an image-to-image edit.
 func cursorImagesRequest(payload []byte) (string, []cursorlib.ReferenceImage, error) {
+	req, err := cursorImagesInput(payload)
+	if err != nil {
+		return "", nil, err
+	}
+	return req.prompt, req.refs, nil
+}
+
+// imagesRequest is one parsed /v1/images call. longEdge is the resolution the
+// caller asked for, either through the OpenAI size parameter or in words in
+// the prompt; 0 means the generated image is served as rendered.
+type imagesRequest struct {
+	prompt   string
+	refs     []cursorlib.ReferenceImage
+	longEdge int
+}
+
+func cursorImagesInput(payload []byte) (imagesRequest, error) {
 	if boundary, ok := multipartBoundary(payload); ok {
 		return cursorImagesFromMultipart(payload, boundary)
 	}
 	if !gjson.ValidBytes(payload) {
-		return "", nil, fmt.Errorf("cursor: %s requires a JSON or multipart/form-data body", cursorImageModelID)
+		return imagesRequest{}, fmt.Errorf("cursor: %s requires a JSON or multipart/form-data body", cursorImageModelID)
 	}
 	prompt := strings.TrimSpace(gjson.GetBytes(payload, "prompt").String())
 	if prompt == "" {
-		return "", nil, fmt.Errorf("cursor: images request prompt is required")
+		return imagesRequest{}, fmt.Errorf("cursor: images request prompt is required")
 	}
 	if gjson.GetBytes(payload, "mask").Exists() {
-		return "", nil, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
+		return imagesRequest{}, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
 	}
+	longEdge := requestedLongEdge(prompt, gjson.GetBytes(payload, "size").String())
 	var sources []string
 	collect := func(res gjson.Result) {
 		switch {
@@ -560,15 +585,25 @@ func cursorImagesRequest(payload []byte) (string, []cursorlib.ReferenceImage, er
 	for _, src := range sources {
 		data, mime, err := decodeImageDataURL(src)
 		if err != nil {
-			return "", nil, err
+			return imagesRequest{}, err
 		}
 		refs = append(refs, cursorlib.ReferenceImage{Data: data, MimeType: mime})
 	}
 	refs, err := finalizeReferenceImages(refs)
 	if err != nil {
-		return "", nil, err
+		return imagesRequest{}, err
 	}
-	return prompt, refs, nil
+	return imagesRequest{prompt: prompt, refs: refs, longEdge: longEdge}, nil
+}
+
+// requestedLongEdge combines the two ways a caller can ask for a resolution:
+// the OpenAI size parameter, and saying "4K" in the prompt. The larger wins.
+func requestedLongEdge(prompt, size string) int {
+	longEdge := cursorlib.RequestedLongEdge(prompt)
+	if sized := cursorlib.RequestedLongEdge(strings.TrimSpace(size)); sized > longEdge {
+		longEdge = sized
+	}
+	return longEdge
 }
 
 // multipartBoundary recovers the boundary from a multipart body. The images
@@ -589,11 +624,11 @@ func multipartBoundary(payload []byte) (string, bool) {
 	return boundary, true
 }
 
-func cursorImagesFromMultipart(payload []byte, boundary string) (string, []cursorlib.ReferenceImage, error) {
+func cursorImagesFromMultipart(payload []byte, boundary string) (imagesRequest, error) {
 	reader := multipart.NewReader(bytes.NewReader(payload), boundary)
 	form, err := reader.ReadForm(cursorMultipartMemoryLimit)
 	if err != nil {
-		return "", nil, fmt.Errorf("cursor: parse multipart images request: %w", err)
+		return imagesRequest{}, fmt.Errorf("cursor: parse multipart images request: %w", err)
 	}
 	defer func() { _ = form.RemoveAll() }()
 
@@ -602,10 +637,14 @@ func cursorImagesFromMultipart(payload []byte, boundary string) (string, []curso
 		prompt = strings.TrimSpace(values[0])
 	}
 	if prompt == "" {
-		return "", nil, fmt.Errorf("cursor: images request prompt is required")
+		return imagesRequest{}, fmt.Errorf("cursor: images request prompt is required")
 	}
 	if len(form.File["mask"]) > 0 {
-		return "", nil, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
+		return imagesRequest{}, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
+	}
+	size := ""
+	if values := form.Value["size"]; len(values) > 0 {
+		size = values[0]
 	}
 
 	headers := form.File["image[]"]
@@ -616,20 +655,20 @@ func cursorImagesFromMultipart(payload []byte, boundary string) (string, []curso
 	for _, header := range headers {
 		file, errOpen := header.Open()
 		if errOpen != nil {
-			return "", nil, fmt.Errorf("cursor: open uploaded image %q: %w", header.Filename, errOpen)
+			return imagesRequest{}, fmt.Errorf("cursor: open uploaded image %q: %w", header.Filename, errOpen)
 		}
 		data, errRead := io.ReadAll(io.LimitReader(file, cursorMaxReferenceImageBytes+1))
 		_ = file.Close()
 		if errRead != nil {
-			return "", nil, fmt.Errorf("cursor: read uploaded image %q: %w", header.Filename, errRead)
+			return imagesRequest{}, fmt.Errorf("cursor: read uploaded image %q: %w", header.Filename, errRead)
 		}
 		refs = append(refs, cursorlib.ReferenceImage{Data: data, MimeType: header.Header.Get("Content-Type")})
 	}
 	refs, err = finalizeReferenceImages(refs)
 	if err != nil {
-		return "", nil, err
+		return imagesRequest{}, err
 	}
-	return prompt, refs, nil
+	return imagesRequest{prompt: prompt, refs: refs, longEdge: requestedLongEdge(prompt, size)}, nil
 }
 
 // cursorMultipartMemoryLimit bounds in-memory multipart buffering; larger parts
@@ -716,6 +755,17 @@ func buildCursorImagesResponse(images []cursorlib.GeneratedImage) []byte {
 		out, _ = sjson.SetRawBytes(out, "data.-1", item)
 	}
 	return out
+}
+
+// latestUserContent returns the prompt of the turn being answered, which is
+// where a caller states the resolution they want.
+func latestUserContent(messages []cursorlib.ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			return messages[i].Content
+		}
+	}
+	return ""
 }
 
 // rewriteImageChatMessages collapses a chat request against the image

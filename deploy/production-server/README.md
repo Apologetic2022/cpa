@@ -25,15 +25,15 @@
 
 ## 谁能出图
 
-出图只有两条入口：模型 `image`（`/v1/chat/completions`、`/v1/messages` 都可以点名
-它），以及 `/v1/images/generations`、`/v1/images/edits`。别的模型一律出不了图。
+出图只有两条入口：模型 `nano-banana-pro`（`/v1/chat/completions`、`/v1/messages` 都
+可以点名它），以及 `/v1/images/generations`、`/v1/images/edits`。别的模型一律出不了图。
 
 拦截分三层：
 
 1. Cursor 发 interaction query 要客户端批准 GenerateImage 时，非出图会话回
    rejected。
 2. 非出图会话的 run request 里直接告诉模型这轮不能出图。
-3. 真送来了图也丢掉，回复里换成一句"这个模型不能出图，请用 `image`"。
+3. 真送来了图也丢掉，回复里换成一句"这个模型不能出图，请用 `nano-banana-pro`"。
 
 第 3 层是唯一保证生效的：实测 Cursor 的服务端**不总是**先问客户端，`grok-4.6` 上
 GenerateImage 会直接跑完并返回 success（日志里 `cursor genimage completed`），前两层
@@ -45,8 +45,26 @@ GenerateImage 会直接跑完并返回 success（日志里 `cursor genimage comp
 经出好了的文字，外加一个指向 Cursor 侧工作区、根本打不开的本地路径（这个死链接现在
 也会被剥掉）。
 
-模型对外只叫 `image`；以前的 `cursor-image` 不再注册，`/v1/models` 里没有它，点名它
-会被当成未知模型拒掉。
+模型对外只叫 `nano-banana-pro`；以前的 `cursor-image` / `image` 都不再注册，
+`/v1/models` 里没有它们，点名会被当成未知模型拒掉。
+
+## 2K / 4K 自动超分
+
+Cursor 的 GenerateImage 只收一段文字描述，协议里没有尺寸参数，出图固定在 1536×1024
+上下（约 1.5 MP）。所以"要 4K"这件事上游做不到，只能网关自己放大。
+
+识别：看这一轮的用户提示（以及 `/v1/images/*` 的 `size` 参数），命中就取长边像素——
+`2K`/`QHD`/`1440p`/`2560×1440` → 2560，`4K`/`8K`/`UHD`/`2160p`/`3840x2160` → 3840，
+写死的 `3000x2000` 这种按原样取（上限 4096）。`1024x1024` 及以下不算"要更大"，直接跳过。
+`2k people` 这类计数写法有一份名词黑名单挡掉；提示里完全不提尺寸就什么都不做。
+
+放大：Catmull-Rom 三次卷积分离式重采样（先行后列），再过一遍轻度 unsharp mask 补回
+放大损失的局部对比度。纯 Go 实现，没引入新依赖——这台机器上没有 GPU，也没有
+realesrgan / waifu2x / ffmpeg / ImageMagick，所以不是神经网络超分，是高质量重采样。
+
+边界：最多放大 4 倍（再多就只是糊，不如给原图）；已经够大的图原样返回；PNG 超过 6 MB
+时改存 JPEG q92（实测 1536×1024 → 3840×2560 的 PNG 有 11 MB，JPEG 只有 1.2 MB，客户端
+要先下完才能显示）。耗时：2K 约 0.65 s，4K 约 1.5 s，相对 20~30 s 的出图可以忽略。
 
 ## 生成图片的对外地址
 

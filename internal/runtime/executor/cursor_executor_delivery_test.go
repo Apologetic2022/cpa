@@ -151,7 +151,7 @@ func TestLinkDeliveryHidesAddressBehindTheImage(t *testing.T) {
 		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
 	urls := cursorImageURLs("https://gw.example.com", result.Images)
-	content := gjson.GetBytes(buildOpenAIChatCompletion("image", result, urls), "choices.0.message.content").String()
+	content := gjson.GetBytes(buildOpenAIChatCompletion("nano-banana-pro", result, urls), "choices.0.message.content").String()
 
 	if !strings.Contains(content, "![Generated image](https://gw.example.com"+cursorlib.PublishedImagePathPrefix) {
 		t.Fatalf("image is not rendered as a link: %q", content)
@@ -168,10 +168,10 @@ func TestLinkDeliveryHidesAddressBehindTheImage(t *testing.T) {
 // Image generation is a property of the model, not of the prompt: a chat on
 // any other model must not reach the image tool.
 func TestOnlyTheImageModelMayGenerate(t *testing.T) {
-	if !isImageModel("image") || !isImageModel("Image") {
+	if !isImageModel("nano-banana-pro") || !isImageModel("Nano-Banana-Pro") {
 		t.Fatal("the image model cannot generate images")
 	}
-	for _, model := range []string{"grok-4.6", "claude-4.6-sonnet", "default", "gpt-5.4", "cursor-image", "image-2"} {
+	for _, model := range []string{"grok-4.6", "claude-4.6-sonnet", "default", "gpt-5.4", "cursor-image", "image", "nano-banana"} {
 		if isImageModel(model) {
 			t.Fatalf("%q is allowed to generate images", model)
 		}

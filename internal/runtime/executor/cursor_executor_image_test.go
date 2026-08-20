@@ -73,7 +73,7 @@ func TestRewriteImageChatMessagesUsesEditInstructionWithRefs(t *testing.T) {
 }
 
 func TestExtractChatImageInputs(t *testing.T) {
-	body := []byte(`{"model":"image","messages":[
+	body := []byte(`{"model":"nano-banana-pro","messages":[
       {"role":"user","content":[{"type":"text","text":"first turn"},
                                 {"type":"image_url","image_url":{"url":"data:image/png;base64,` + testPNGBase64 + `"}}]},
       {"role":"assistant","content":"ok"},
@@ -156,14 +156,14 @@ func TestExtractChatImageInputsRejectsRemoteURL(t *testing.T) {
 }
 
 func TestCursorImagesRequestGeneration(t *testing.T) {
-	prompt, refs, err := cursorImagesRequest([]byte(`{"model":"image","prompt":"a red fox"}`))
+	prompt, refs, err := cursorImagesRequest([]byte(`{"model":"nano-banana-pro","prompt":"a red fox"}`))
 	if err != nil || prompt != "a red fox" {
 		t.Fatalf("prompt = %q err = %v", prompt, err)
 	}
 	if len(refs) != 0 {
 		t.Fatalf("expected no reference images, got %d", len(refs))
 	}
-	if _, _, err = cursorImagesRequest([]byte(`{"model":"image"}`)); err == nil {
+	if _, _, err = cursorImagesRequest([]byte(`{"model":"nano-banana-pro"}`)); err == nil {
 		t.Fatal("expected error for missing prompt")
 	}
 	if _, _, err = cursorImagesRequest([]byte(`not json`)); err == nil {
@@ -171,8 +171,34 @@ func TestCursorImagesRequestGeneration(t *testing.T) {
 	}
 }
 
+// A caller can ask for the resolution either the OpenAI way or in words, and
+// the images endpoints have to honour both.
+func TestCursorImagesInputReadsTheRequestedResolution(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"prompt":"a red fox"}`, 0},
+		{`{"prompt":"a red fox in 4K"}`, 3840},
+		{`{"prompt":"a red fox","size":"2560x1440"}`, 2560},
+		// The larger of the two wins: both say what the caller wants, and the
+		// bigger one is the one they would notice missing.
+		{`{"prompt":"a red fox in 4K","size":"2048x2048"}`, 3840},
+		{`{"prompt":"a red fox","size":"1024x1024"}`, 0},
+	}
+	for _, tc := range cases {
+		input, err := cursorImagesInput([]byte(tc.body))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if input.longEdge != tc.want {
+			t.Errorf("%s: longEdge = %d, want %d", tc.body, input.longEdge, tc.want)
+		}
+	}
+}
+
 func TestCursorImagesRequestJSONEdit(t *testing.T) {
-	body := `{"model":"image","prompt":"make it green","images":[{"image_url":"data:image/png;base64,` + testPNGBase64 + `"}]}`
+	body := `{"model":"nano-banana-pro","prompt":"make it green","images":[{"image_url":"data:image/png;base64,` + testPNGBase64 + `"}]}`
 	prompt, refs, err := cursorImagesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -544,7 +570,7 @@ func TestBuildOpenAIChatCompletionLinksImageInContent(t *testing.T) {
 		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
 	urls := hostedURLs(t, "https://gw.example.com", result.Images)
-	payload := buildOpenAIChatCompletion("image", result, urls)
+	payload := buildOpenAIChatCompletion("nano-banana-pro", result, urls)
 	content := gjson.GetBytes(payload, "choices.0.message.content").String()
 	if strings.Contains(content, "/home/cliproxy") {
 		t.Fatalf("content still points at a nonexistent path: %q", content)
@@ -565,7 +591,7 @@ func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 			{Base64: "QUJD", MimeType: "image/png"},
 		},
 	}
-	payload := buildOpenAIChatCompletion("image", result, cursorImageURLs("", result.Images))
+	payload := buildOpenAIChatCompletion("nano-banana-pro", result, cursorImageURLs("", result.Images))
 	images := gjson.GetBytes(payload, "choices.0.message.images")
 	if !images.IsArray() || len(images.Array()) != 1 {
 		t.Fatalf("missing images array: %s", payload)
