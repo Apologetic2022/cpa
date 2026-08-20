@@ -357,6 +357,49 @@ message WriteResult {
   }
 }
 
+// Read exec surface. Cursor's server pulls client-side files through this exec
+// when a tool needs their bytes; GenerateImage uses it to fetch every path
+// listed in reference_image_paths. The headless client has no real workspace on
+// disk, so reads are answered from the reference images held in memory for the
+// run. Field numbers match the full agent.proto ReadArgs/ReadResult.
+message ReadArgs {
+  string path = 1;
+  string tool_call_id = 2;
+  optional int32 offset = 4;
+  optional uint32 limit = 5;
+  optional string encoding_hint = 6;
+}
+
+message ReadSuccess {
+  string path = 1;
+  int32 total_lines = 3;
+  int64 file_size = 4;
+  bool truncated = 6;
+  // Binary reads use data; content stays for text files.
+  oneof output {
+    string content = 2;
+    bytes data = 5;
+  }
+  bool range_applied = 8;
+}
+
+message ReadError {
+  string path = 1;
+  string error = 2;
+}
+
+message ReadFileNotFound {
+  string path = 1;
+}
+
+message ReadResult {
+  oneof result {
+    ReadSuccess success = 1;
+    ReadError error = 2;
+    ReadFileNotFound file_not_found = 4;
+  }
+}
+
 message RequestContextSuccess {
   RequestContext request_context = 1;
 }
@@ -372,6 +415,7 @@ message ExecServerMessage {
   string exec_id = 15;
   oneof message {
     WriteArgs write_args = 3;
+    ReadArgs read_args = 7;
     RequestContextArgs request_context_args = 10;
     McpArgs mcp_args = 11;
   }
@@ -382,6 +426,7 @@ message ExecClientMessage {
   string exec_id = 15;
   oneof message {
     WriteResult write_result = 3;
+    ReadResult read_result = 7;
     RequestContextResult request_context_result = 10;
     McpResult mcp_result = 11;
   }

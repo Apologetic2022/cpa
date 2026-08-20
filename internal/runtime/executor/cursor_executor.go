@@ -3,8 +3,11 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -333,7 +336,7 @@ func (e *CursorExecutor) executeImages(ctx context.Context, auth *cliproxyauth.A
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	prompt, err := cursorImagesPrompt(req.Payload)
+	prompt, refs, err := cursorImagesRequest(req.Payload)
 	if err != nil {
 		return resp, err
 	}
@@ -341,7 +344,7 @@ func (e *CursorExecutor) executeImages(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	result, err := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt)
+	result, err := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt, refs...)
 	if err != nil {
 		return resp, err
 	}
@@ -365,7 +368,7 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	prompt, err := cursorImagesPrompt(req.Payload)
+	prompt, refs, err := cursorImagesRequest(req.Payload)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +379,7 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		result, errRun := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt)
+		result, errRun := cursorlib.RunImageGeneration(ctx, creds, cursorlib.ImageGenerationAgentModel, prompt, refs...)
 		if errRun != nil {
 			reporter.PublishFailure(ctx, errRun)
 			select {
@@ -413,18 +416,202 @@ func (e *CursorExecutor) executeImagesStream(ctx context.Context, auth *cliproxy
 	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 }
 
-func cursorImagesPrompt(payload []byte) (string, error) {
-	if !gjson.ValidBytes(payload) {
-		return "", fmt.Errorf("cursor: %s requires a JSON body; multipart /v1/images/edits uploads are not supported", cursorImageModelID)
+// cursorMaxReferenceImages caps how many input images one edit run advertises.
+// Cursor renders server-side and the bytes travel back over the read exec, so
+// an unbounded list would be a cheap way to blow up a single turn.
+const cursorMaxReferenceImages = 4
+
+// cursorImagesRequest extracts the prompt and any input images from an images
+// payload. Both the JSON and multipart shapes the OpenAI images handlers
+// produce are accepted; input images turn the run into an image-to-image edit.
+func cursorImagesRequest(payload []byte) (string, []cursorlib.ReferenceImage, error) {
+	if boundary, ok := multipartBoundary(payload); ok {
+		return cursorImagesFromMultipart(payload, boundary)
 	}
-	if gjson.GetBytes(payload, "image").Exists() || gjson.GetBytes(payload, "images").Exists() {
-		return "", fmt.Errorf("cursor: %s does not support image edits; use /v1/images/generations", cursorImageModelID)
+	if !gjson.ValidBytes(payload) {
+		return "", nil, fmt.Errorf("cursor: %s requires a JSON or multipart/form-data body", cursorImageModelID)
 	}
 	prompt := strings.TrimSpace(gjson.GetBytes(payload, "prompt").String())
 	if prompt == "" {
-		return "", fmt.Errorf("cursor: images request prompt is required")
+		return "", nil, fmt.Errorf("cursor: images request prompt is required")
 	}
-	return prompt, nil
+	if gjson.GetBytes(payload, "mask").Exists() {
+		return "", nil, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
+	}
+	var sources []string
+	collect := func(res gjson.Result) {
+		switch {
+		case res.IsArray():
+			for _, item := range res.Array() {
+				if item.Type == gjson.String {
+					sources = append(sources, item.String())
+					continue
+				}
+				for _, key := range []string{"image_url", "url"} {
+					if v := strings.TrimSpace(item.Get(key).String()); v != "" {
+						sources = append(sources, v)
+						break
+					}
+				}
+			}
+		case res.Type == gjson.String:
+			sources = append(sources, res.String())
+		case res.IsObject():
+			for _, key := range []string{"image_url", "url"} {
+				if v := strings.TrimSpace(res.Get(key).String()); v != "" {
+					sources = append(sources, v)
+					break
+				}
+			}
+		}
+	}
+	collect(gjson.GetBytes(payload, "images"))
+	collect(gjson.GetBytes(payload, "image"))
+
+	refs := make([]cursorlib.ReferenceImage, 0, len(sources))
+	for _, src := range sources {
+		data, mime, err := decodeImageDataURL(src)
+		if err != nil {
+			return "", nil, err
+		}
+		refs = append(refs, cursorlib.ReferenceImage{Data: data, MimeType: mime})
+	}
+	refs, err := finalizeReferenceImages(refs)
+	if err != nil {
+		return "", nil, err
+	}
+	return prompt, refs, nil
+}
+
+// multipartBoundary recovers the boundary from a multipart body. The images
+// handlers re-encode uploads before the executor sees them and the inbound
+// Content-Type is not carried along, so it is read back off the payload.
+func multipartBoundary(payload []byte) (string, bool) {
+	if !bytes.HasPrefix(payload, []byte("--")) {
+		return "", false
+	}
+	end := bytes.IndexByte(payload, '\n')
+	if end <= 2 {
+		return "", false
+	}
+	boundary := strings.TrimSpace(string(payload[2:end]))
+	if boundary == "" {
+		return "", false
+	}
+	return boundary, true
+}
+
+func cursorImagesFromMultipart(payload []byte, boundary string) (string, []cursorlib.ReferenceImage, error) {
+	reader := multipart.NewReader(bytes.NewReader(payload), boundary)
+	form, err := reader.ReadForm(cursorMultipartMemoryLimit)
+	if err != nil {
+		return "", nil, fmt.Errorf("cursor: parse multipart images request: %w", err)
+	}
+	defer func() { _ = form.RemoveAll() }()
+
+	prompt := ""
+	if values := form.Value["prompt"]; len(values) > 0 {
+		prompt = strings.TrimSpace(values[0])
+	}
+	if prompt == "" {
+		return "", nil, fmt.Errorf("cursor: images request prompt is required")
+	}
+	if len(form.File["mask"]) > 0 {
+		return "", nil, fmt.Errorf("cursor: %s does not support masks; omit mask and describe the change in the prompt", cursorImageModelID)
+	}
+
+	headers := form.File["image[]"]
+	if len(headers) == 0 {
+		headers = form.File["image"]
+	}
+	refs := make([]cursorlib.ReferenceImage, 0, len(headers))
+	for _, header := range headers {
+		file, errOpen := header.Open()
+		if errOpen != nil {
+			return "", nil, fmt.Errorf("cursor: open uploaded image %q: %w", header.Filename, errOpen)
+		}
+		data, errRead := io.ReadAll(io.LimitReader(file, cursorMaxReferenceImageBytes+1))
+		_ = file.Close()
+		if errRead != nil {
+			return "", nil, fmt.Errorf("cursor: read uploaded image %q: %w", header.Filename, errRead)
+		}
+		refs = append(refs, cursorlib.ReferenceImage{Data: data, MimeType: header.Header.Get("Content-Type")})
+	}
+	refs, err = finalizeReferenceImages(refs)
+	if err != nil {
+		return "", nil, err
+	}
+	return prompt, refs, nil
+}
+
+// cursorMultipartMemoryLimit bounds in-memory multipart buffering; larger parts
+// spill to temp files that ReadForm cleans up.
+const cursorMultipartMemoryLimit = 32 << 20
+
+// cursorMaxReferenceImageBytes bounds a single decoded input image.
+const cursorMaxReferenceImageBytes = 20 << 20
+
+// finalizeReferenceImages validates decoded input images and assigns the
+// workspace paths advertised to Cursor.
+func finalizeReferenceImages(refs []cursorlib.ReferenceImage) ([]cursorlib.ReferenceImage, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if len(refs) > cursorMaxReferenceImages {
+		return nil, fmt.Errorf("cursor: %s accepts at most %d input images, got %d", cursorImageModelID, cursorMaxReferenceImages, len(refs))
+	}
+	out := make([]cursorlib.ReferenceImage, 0, len(refs))
+	for i, ref := range refs {
+		if len(ref.Data) == 0 {
+			return nil, fmt.Errorf("cursor: input image %d is empty", i+1)
+		}
+		if len(ref.Data) > cursorMaxReferenceImageBytes {
+			return nil, fmt.Errorf("cursor: input image %d exceeds the %d MiB limit", i+1, cursorMaxReferenceImageBytes>>20)
+		}
+		// Sniff rather than trust the declared type: a caller-supplied MIME
+		// can be absent, generic, or simply wrong, and shipping non-image
+		// bytes upstream fails far less legibly than rejecting them here.
+		mime := http.DetectContentType(ref.Data)
+		if !strings.HasPrefix(mime, "image/") {
+			return nil, fmt.Errorf("cursor: input image %d is not a recognised image (detected %q)", i+1, mime)
+		}
+		out = append(out, cursorlib.ReferenceImage{
+			Path:     cursorlib.ReferenceImagePath(i, mime),
+			Data:     ref.Data,
+			MimeType: mime,
+		})
+	}
+	return out, nil
+}
+
+// decodeImageDataURL accepts the data URLs the images handlers emit, plus bare
+// base64. Remote URLs are rejected: fetching them would let a caller drive
+// outbound requests from the proxy.
+func decodeImageDataURL(src string) ([]byte, string, error) {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return nil, "", fmt.Errorf("cursor: input image is empty")
+	}
+	mime := ""
+	if strings.HasPrefix(src, "data:") {
+		comma := strings.IndexByte(src, ',')
+		if comma < 0 {
+			return nil, "", fmt.Errorf("cursor: malformed image data URL")
+		}
+		meta := src[5:comma]
+		if !strings.Contains(meta, ";base64") {
+			return nil, "", fmt.Errorf("cursor: image data URLs must be base64 encoded")
+		}
+		mime = strings.TrimSpace(strings.SplitN(meta, ";", 2)[0])
+		src = src[comma+1:]
+	} else if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return nil, "", fmt.Errorf("cursor: %s requires inline image data; remote image URLs are not supported", cursorImageModelID)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(src))
+	if err != nil {
+		return nil, "", fmt.Errorf("cursor: decode input image: %w", err)
+	}
+	return data, mime, nil
 }
 
 // buildCursorImagesResponse renders images in the upstream JSON shape the

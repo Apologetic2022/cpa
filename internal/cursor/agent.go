@@ -382,6 +382,31 @@ func headlessWorkspaceRoot() (root, project string) {
 	return root, project
 }
 
+// referenceImageDir is the folder inside the headless project that reference
+// images are advertised under. Cursor only ever sees these paths through
+// GenerateImageArgs.reference_image_paths and reads them back over the read
+// exec, so the directory does not need to exist on disk.
+func referenceImageDir() string {
+	_, project := headlessWorkspaceRoot()
+	return filepath.Join(project, "assets", "references")
+}
+
+// ReferenceImagePath builds the workspace path advertised for the index-th
+// reference image of a run. The extension is derived from the MIME type so the
+// server can infer the format from the path alone.
+func ReferenceImagePath(index int, mimeType string) string {
+	ext := ".png"
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg", "image/jpg":
+		ext = ".jpg"
+	case "image/webp":
+		ext = ".webp"
+	case "image/gif":
+		ext = ".gif"
+	}
+	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, ext))
+}
+
 // writeHeadlessWorkspaceFile persists server-delivered file bytes (e.g. the
 // GenerateImage PNG) when the target lies inside the headless workspace or
 // project folder. Failures are ignored: the bytes are returned inline anyway.
