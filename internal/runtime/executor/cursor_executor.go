@@ -44,7 +44,7 @@ const (
 // imageUnavailableNote replaces the image a conversation was not allowed to
 // produce. Cursor's server sometimes renders one anyway and the model then
 // says it delivered a picture, so the reply has to correct that itself.
-const imageUnavailableNote = "_(This model cannot return images. Ask the `image` model for one.)_"
+const imageUnavailableNote = "_(This model cannot return images. Ask the `nano-banana-pro` model for one.)_"
 
 // isImageModel reports whether a chat request may produce images. Only the
 // dedicated image model may: on every other model the Agent's image tool is
