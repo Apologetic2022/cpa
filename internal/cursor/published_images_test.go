@@ -118,6 +118,65 @@ func TestPublishedImagePruneDropsExpiredFiles(t *testing.T) {
 	}
 }
 
+func TestPublishedImageRetentionIsOneDay(t *testing.T) {
+	if publishedImageTTL != 24*time.Hour {
+		t.Fatalf("retention window is %s, want 24h", publishedImageTTL)
+	}
+}
+
+func TestSweepDeletesImagesOlderThanRetention(t *testing.T) {
+	store := newTestStore(t)
+	store.put("fresh.png", publishedImage{data: onePixelPNG, mime: "image/png", expires: time.Now().Add(publishedImageTTL)})
+	store.put("stale.png", publishedImage{data: onePixelPNG, mime: "image/png", expires: time.Now().Add(-time.Minute)})
+	stalePath := filepath.Join(store.dir, "stale.png")
+	old := time.Now().Add(-publishedImageTTL - time.Minute)
+	if err := os.Chtimes(stalePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, freed := store.sweep(time.Now())
+	if removed != 1 {
+		t.Fatalf("removed %d files, want 1", removed)
+	}
+	if freed != int64(len(onePixelPNG)) {
+		t.Fatalf("freed %d bytes, want %d", freed, len(onePixelPNG))
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("expired file survived the sweep: %v", err)
+	}
+	if _, ok := store.items["stale.png"]; ok {
+		t.Fatal("expired entry still held in memory")
+	}
+	if _, _, ok := store.get("fresh.png"); !ok {
+		t.Fatal("sweep dropped an image inside the retention window")
+	}
+}
+
+// A cache that stops receiving new images still has to shrink on its own.
+func TestJanitorSweepsWithoutNewPublishes(t *testing.T) {
+	store := newTestStore(t)
+	stale := filepath.Join(store.dir, "old.png")
+	if err := os.WriteFile(stale, onePixelPNG, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-publishedImageTTL - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	store.startJanitor()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(stale); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("janitor did not delete the expired file")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestPublishedImageNameValidation(t *testing.T) {
 	store := newTestStore(t)
 	secret := filepath.Join(filepath.Dir(store.dir), "secret.png")

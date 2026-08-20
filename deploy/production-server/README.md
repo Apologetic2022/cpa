@@ -40,6 +40,8 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
 - drop-in `cli-proxy-api.service.d/public-base-url.conf` 把 `CPA_PUBLIC_BASE_URL` 固定为
   `https://15-204-94-214.sslip.io`，并把图片缓存目录指到 `/opt/cli-proxy/image-cache`
   （服务用户 `cliproxy` 没有 home，且 `PrivateTmp=true` 会在重启时清空 /tmp）。
+- 生成图只保留 24 小时：网关自带清理协程，启动时先扫一遍，之后每小时扫一次，
+  删掉 `/opt/cli-proxy/image-cache` 里超过一天的文件，不需要 cron 或 systemd timer。
 - 80 端口对 `/cursor-images/` 做 301，把换证书之前发出去的旧链接也导到受信任域名。
 - 续期由 `certbot.timer` 负责，`renewal-hooks/deploy/reload-nginx.sh` 在续期后 reload nginx。
   换成自有域名后，改 drop-in 里的地址 + 新签一张证书即可。

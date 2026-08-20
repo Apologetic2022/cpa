@@ -515,6 +515,7 @@ func (s *Server) setupRoutes() {
 	// sends no credentials. The unguessable name in the URL is the capability.
 	s.engine.GET(cursorlib.PublishedImageRoute, serveGeneratedImage)
 	s.engine.HEAD(cursorlib.PublishedImageRoute, serveGeneratedImage)
+	cursorlib.StartPublishedImageJanitor()
 
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // PublishedImagePathPrefix is the URL prefix the gateway serves generated
@@ -24,10 +26,15 @@ const PublishedImagePathPrefix = "/cursor-images/"
 const PublishedImageRoute = PublishedImagePathPrefix + ":name"
 
 const (
-	// publishedImageTTL bounds how long a hosted image stays fetchable. A link
-	// sits in the client's transcript and is re-fetched every time that
-	// conversation is reopened, so it has to outlive the turn by a wide margin.
-	publishedImageTTL = 72 * time.Hour
+	// publishedImageTTL bounds how long a hosted image stays fetchable.
+	// Generated images run to several megabytes each, so the cache is kept to
+	// a single day: long enough for the conversation the link belongs to,
+	// short enough that the directory does not grow without bound.
+	publishedImageTTL = 24 * time.Hour
+	// publishedImageSweepEvery is how often expired images are deleted. New
+	// images also trigger a prune, but a gateway that stops generating them
+	// would otherwise keep the last day's files forever.
+	publishedImageSweepEvery = time.Hour
 	// publishedImageMaxBytes caps the cache directory.
 	publishedImageMaxBytes = 2 << 30
 	// publishedImageMemoryBytes caps what is kept in the heap on top of that;
@@ -50,11 +57,12 @@ type publishedImageStore struct {
 	mu sync.Mutex
 	// dir is the on-disk cache. Empty means memory-only, which is what the
 	// store falls back to when no directory can be created.
-	dir      string
-	dirReady bool
-	items    map[string]publishedImage
-	order    []string
-	bytes    int
+	dir         string
+	dirReady    bool
+	items       map[string]publishedImage
+	order       []string
+	bytes       int
+	janitorOnce sync.Once
 }
 
 var publishedImages = &publishedImageStore{items: make(map[string]publishedImage)}
@@ -100,6 +108,46 @@ func PublishImageBytes(data []byte, mimeType string) string {
 // LookupPublishedImage returns the bytes and MIME type hosted under name.
 func LookupPublishedImage(name string) ([]byte, string, bool) {
 	return publishedImages.get(strings.TrimSpace(name))
+}
+
+// StartPublishedImageJanitor deletes hosted images older than the retention
+// window, both at startup and on a timer, for the life of the process. It is
+// safe to call more than once.
+func StartPublishedImageJanitor() {
+	publishedImages.startJanitor()
+}
+
+func (s *publishedImageStore) startJanitor() {
+	s.janitorOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(publishedImageSweepEvery)
+			defer ticker.Stop()
+			for {
+				// Sweep first: a restart is the one moment a cache that
+				// stopped receiving images gets cleaned up at all.
+				if removed, freed := s.sweep(time.Now()); removed > 0 {
+					log.Debugf("cursor image cache: deleted %d image(s) older than %s, freed %d bytes", removed, publishedImageTTL, freed)
+				}
+				<-ticker.C
+			}
+		}()
+	})
+}
+
+// sweep drops every image past the retention window, on disk and in memory.
+func (s *publishedImageStore) sweep(now time.Time) (removed int, freed int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, img := range s.items {
+		if !img.expires.After(now) {
+			s.forgetLocked(name)
+		}
+	}
+	dir := s.cacheDirLocked()
+	if dir == "" {
+		return 0, 0
+	}
+	return s.pruneDirLocked(dir, now)
 }
 
 func (s *publishedImageStore) put(name string, img publishedImage) {
@@ -193,7 +241,7 @@ func (s *publishedImageStore) writeFileLocked(name string, data []byte) {
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 		return
 	}
-	s.pruneDirLocked(dir, time.Now())
+	_, _ = s.pruneDirLocked(dir, time.Now())
 }
 
 func (s *publishedImageStore) readFileLocked(name string, now time.Time) ([]byte, bool) {
@@ -226,11 +274,11 @@ func (s *publishedImageStore) removeFileLocked(name string) {
 }
 
 // pruneDirLocked drops expired files and, once the directory is over its size
-// cap, the oldest ones until it fits again.
-func (s *publishedImageStore) pruneDirLocked(dir string, now time.Time) {
+// cap, the oldest ones until it fits again. It reports what it deleted.
+func (s *publishedImageStore) pruneDirLocked(dir string, now time.Time) (removed int, freed int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return removed, freed
 	}
 	type cached struct {
 		name    string
@@ -248,24 +296,30 @@ func (s *publishedImageStore) pruneDirLocked(dir string, now time.Time) {
 			continue
 		}
 		if now.Sub(info.ModTime()) > publishedImageTTL {
-			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			if os.Remove(filepath.Join(dir, entry.Name())) == nil {
+				removed++
+				freed += info.Size()
+			}
 			continue
 		}
 		files = append(files, cached{name: entry.Name(), size: info.Size(), modTime: info.ModTime()})
 		total += info.Size()
 	}
 	if total <= publishedImageMaxBytes {
-		return
+		return removed, freed
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
 	for _, file := range files {
 		if total <= publishedImageMaxBytes {
-			return
+			return removed, freed
 		}
 		if err = os.Remove(filepath.Join(dir, file.name)); err == nil {
 			total -= file.size
+			removed++
+			freed += file.size
 		}
 	}
+	return removed, freed
 }
 
 // validPublishedImageName rejects anything that is not a name this store
