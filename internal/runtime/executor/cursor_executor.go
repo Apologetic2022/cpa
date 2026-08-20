@@ -114,7 +114,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	outPayload := buildOpenAIChatCompletion(req.Model, result, imageChat)
+	outPayload := buildOpenAIChatCompletion(req.Model, result)
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
 		OutputTokens:    result.OutputTokens,
@@ -235,17 +235,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return emitLine([]byte("data: " + string(chunk)))
 		}
 
-		// Text rewriting is confined to the image model: a general chat turn must
-		// stream back byte-for-byte, including any HTML it happens to quote.
+		// Any model can reach the GenerateImage tool, so this is keyed off the
+		// workspace path the tag carries rather than off the requested model.
 		var imgFilter streamImgFilter
 		errIter := session.IterSegment(ctx, func(ev cursorlib.StreamEvent) error {
 			var delta map[string]any
 			switch ev.Type {
 			case "text_delta":
-				text := ev.Text
-				if imageChat {
-					text = imgFilter.Feed(text)
-				}
+				text := imgFilter.Feed(ev.Text)
 				if text == "" {
 					return nil
 				}
@@ -259,7 +256,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				// Inline the image in the text too: clients that render only
 				// content would otherwise show nothing, since the path Cursor
 				// reports does not exist on a headless relay.
-				if imageChat && !emitDelta(map[string]any{
+				if !emitDelta(map[string]any{
 					"content": `<img src="` + ev.Image.DataURL() + `" alt="Generated image" />`,
 				}) {
 					return context.Canceled
@@ -958,8 +955,9 @@ var imgSrcPattern = regexp.MustCompile(`(?is)(<img\b[^>]*?\bsrc=")([^"]*)("[^>]*
 // inlineGeneratedImages rewrites the assistant's <img> tags so the rendered
 // text actually shows the image. Cursor reports the path its desktop client
 // would have saved to, which never exists for a headless relay, so a client
-// that renders the content verbatim gets a broken image. Tags are matched to
-// the run's images by file name and fall back to arrival order.
+// that renders the content verbatim gets a broken image. Only workspace paths
+// are touched; tags are matched to the run's images by file name and fall back
+// to arrival order.
 func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) string {
 	if text == "" || len(images) == 0 {
 		return text
@@ -974,8 +972,7 @@ func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) strin
 	return imgSrcPattern.ReplaceAllStringFunc(text, func(tag string) string {
 		groups := imgSrcPattern.FindStringSubmatch(tag)
 		src := strings.TrimSpace(groups[2])
-		// Anything already addressable by the caller is left alone.
-		if strings.HasPrefix(src, "data:") || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		if !cursorlib.IsHeadlessWorkspacePath(src) {
 			return tag
 		}
 		if url, ok := byName[path.Base(src)]; ok {
@@ -994,17 +991,16 @@ func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) strin
 var imgOpenPattern = regexp.MustCompile(`(?i)<img`)
 
 // keepImgTag reports whether a complete <img> tag can stay in the streamed
-// text. Only tags pointing at the agent's own filesystem are dropped — those
-// are re-emitted inline from the image event once the bytes are known. A tag
-// without a src, or one the caller can already fetch, is left verbatim so a
-// model quoting HTML is not silently edited.
+// text. Only tags naming a file in the client's own advertised workspace are
+// dropped — those never resolve for the caller, and the image is re-emitted
+// inline from the image event once the bytes are known. Everything else,
+// including HTML a model merely quotes, is left verbatim.
 func keepImgTag(tag string) bool {
 	groups := imgSrcPattern.FindStringSubmatch(tag)
 	if groups == nil {
 		return true
 	}
-	src := strings.TrimSpace(groups[2])
-	return strings.HasPrefix(src, "data:") || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://")
+	return !cursorlib.IsHeadlessWorkspacePath(groups[2])
 }
 
 // streamImgFilter removes the assistant's dangling local-path <img> tags from
@@ -1060,22 +1056,15 @@ func (f *streamImgFilter) Flush() string {
 	return buf
 }
 
-// buildOpenAIChatCompletion renders a finished segment. inlineImages rewrites
-// the assistant's <img> tags to data URLs; it is confined to the image model so
-// a general chat turn is returned byte-for-byte, HTML it quotes included.
-func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult, inlineImages bool) []byte {
+func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byte {
 	id := "chatcmpl-" + uuid.NewString()
 	finish := result.FinishReason
 	if finish == "" {
 		finish = "stop"
 	}
-	content := result.Text
-	if inlineImages {
-		content = inlineGeneratedImages(content, result.Images)
-	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": content,
+		"content": inlineGeneratedImages(result.Text, result.Images),
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking

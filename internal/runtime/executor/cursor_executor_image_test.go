@@ -261,8 +261,8 @@ func TestBuildCursorImagesResponse(t *testing.T) {
 }
 
 func TestInlineGeneratedImagesRewritesLocalPath(t *testing.T) {
-	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "/home/cliproxy/.cursor/projects/w/assets/assets/portrait-woman.png"}}
-	text := `已经生成一张写实肖像。<img src="/home/cliproxy/.cursor/projects/w/assets/assets/portrait-woman.png" alt="Generated image" />后续可继续调整。`
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/portrait-woman.png"}}
+	text := `已经生成一张写实肖像。<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/portrait-woman.png" alt="Generated image" />后续可继续调整。`
 
 	got := inlineGeneratedImages(text, imgs)
 	if strings.Contains(got, "/home/cliproxy") {
@@ -282,7 +282,7 @@ func TestInlineGeneratedImagesRewritesLocalPath(t *testing.T) {
 
 func TestInlineGeneratedImagesFallsBackToOrder(t *testing.T) {
 	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "somewhere-else.png"}}
-	got := inlineGeneratedImages(`<img src="assets/unknown-name.png" />`, imgs)
+	got := inlineGeneratedImages(`<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/unknown-name.png" />`, imgs)
 	if !strings.Contains(got, "data:image/png;base64,QUJD") {
 		t.Fatalf("expected order fallback, got %q", got)
 	}
@@ -305,7 +305,13 @@ func TestInlineGeneratedImagesLeavesAddressableSources(t *testing.T) {
 func TestStreamImgFilterDropsTagAcrossChunks(t *testing.T) {
 	var f streamImgFilter
 	// The tag is split across five deltas, mid-attribute.
-	chunks := []string{"生成完毕。", `<im`, `g src="/home/cli`, `proxy/a.png" alt="x"`, ` />剩余文本`}
+	chunks := []string{
+		"生成完毕。",
+		`<im`,
+		`g src="/home/cliproxy/.cursor/pro`,
+		`jects/cliproxy-cursor-workspace/assets/a.png" alt="x"`,
+		` />剩余文本`,
+	}
 	var got strings.Builder
 	for _, c := range chunks {
 		got.WriteString(f.Feed(c))
@@ -314,6 +320,28 @@ func TestStreamImgFilterDropsTagAcrossChunks(t *testing.T) {
 
 	if want := "生成完毕。剩余文本"; got.String() != want {
 		t.Fatalf("filtered text = %q, want %q", got.String(), want)
+	}
+}
+
+func TestInlineGeneratedImagesLeavesUnrelatedLocalPaths(t *testing.T) {
+	// A model writing HTML must keep its own relative/absolute paths, even in a
+	// turn that also produced an image.
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}}
+	for _, src := range []string{"./logo.png", "/var/www/assets/hero.jpg", "images/icon.svg"} {
+		text := `<img src="` + src + `" />`
+		if got := inlineGeneratedImages(text, imgs); got != text {
+			t.Fatalf("rewrote an unrelated path %q -> %q", src, got)
+		}
+	}
+}
+
+func TestStreamImgFilterKeepsUnrelatedLocalPaths(t *testing.T) {
+	for _, src := range []string{"./logo.png", "/var/www/hero.jpg", "images/icon.svg"} {
+		var f streamImgFilter
+		text := `<img src="` + src + `" alt="x">`
+		if got := f.Feed(text) + f.Flush(); got != text {
+			t.Fatalf("filter dropped an unrelated path %q -> %q", src, got)
+		}
 	}
 }
 
@@ -348,7 +376,7 @@ func TestStreamImgFilterPassesPlainText(t *testing.T) {
 
 func TestStreamImgFilterDropsUnterminatedTag(t *testing.T) {
 	var f streamImgFilter
-	out := f.Feed(`done.<img src="/home/cliproxy/a.png"`)
+	out := f.Feed(`done.<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/a.png"`)
 	out += f.Flush()
 	if out != "done." {
 		t.Fatalf("unterminated tag leaked: %q", out)
@@ -357,10 +385,10 @@ func TestStreamImgFilterDropsUnterminatedTag(t *testing.T) {
 
 func TestBuildOpenAIChatCompletionInlinesImageInContent(t *testing.T) {
 	result := &cursorlib.ChatResult{
-		Text:   `here you go<img src="/home/cliproxy/x/cat.png" alt="Generated image" />`,
+		Text:   `here you go<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/cat.png" alt="Generated image" />`,
 		Images: []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result, true)
+	payload := buildOpenAIChatCompletion("cursor-image", result)
 	content := gjson.GetBytes(payload, "choices.0.message.content").String()
 	if strings.Contains(content, "/home/cliproxy") {
 		t.Fatalf("content still points at a nonexistent path: %q", content)
@@ -381,7 +409,7 @@ func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 			{Base64: "QUJD", MimeType: "image/png"},
 		},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result, true)
+	payload := buildOpenAIChatCompletion("cursor-image", result)
 	images := gjson.GetBytes(payload, "choices.0.message.images")
 	if !images.IsArray() || len(images.Array()) != 1 {
 		t.Fatalf("missing images array: %s", payload)

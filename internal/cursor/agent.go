@@ -407,6 +407,38 @@ func ReferenceImagePath(index int, mimeType string) string {
 	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, ext))
 }
 
+// headlessWorkspaceDirName is the folder the headless workspace and its Cursor
+// project are always named after. Paths carrying this segment came from this
+// client's own advertised environment and never exist on disk.
+const headlessWorkspaceDirName = "cliproxy-cursor-workspace"
+
+// IsHeadlessWorkspacePath reports whether a path points inside the workspace
+// this client advertises to Cursor. Such paths are what server-side tools echo
+// back (GenerateImage names its output there), and they never resolve on the
+// relay host, so callers must not surface them as if they were fetchable.
+func IsHeadlessWorkspacePath(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return false
+	}
+	cleaned := filepath.Clean(p)
+	root, project := headlessWorkspaceRoot()
+	for _, base := range []string{root, project} {
+		if rel, err := filepath.Rel(base, cleaned); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	// The service account's home differs between deployments, so also accept
+	// the workspace folder name appearing anywhere in the path.
+	for _, segment := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		if segment == headlessWorkspaceDirName {
+			return true
+		}
+	}
+	return false
+}
+
 // writeHeadlessWorkspaceFile persists server-delivered file bytes (e.g. the
 // GenerateImage PNG) when the target lies inside the headless workspace or
 // project folder. Failures are ignored: the bytes are returned inline anyway.
