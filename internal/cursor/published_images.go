@@ -19,8 +19,9 @@ import (
 // images under. Chat clients sanitise assistant markdown before rendering it
 // and the common sanitisers (harden-react-markdown / streamdown) always reject
 // data: URLs, so an image is only visible when it arrives as an ordinary
-// http(s) link the client can fetch back from this proxy.
-const PublishedImagePathPrefix = "/cursor-images/"
+// http(s) link the client can fetch back from this proxy. The prefix names
+// nothing about the provider: the link is user-visible in every reply.
+const PublishedImagePathPrefix = "/media/"
 
 // PublishedImageRoute is the router pattern matching PublishedImagePathPrefix.
 const PublishedImageRoute = PublishedImagePathPrefix + ":name"
@@ -36,12 +37,20 @@ const PublishedImageAPIPathPrefix = "/v1/images/"
 // prefix.
 const PublishedImageAPIRoute = PublishedImageAPIPathPrefix + ":name"
 
+// PublishedImageLegacyPathPrefix is the prefix this gateway used to publish
+// under. Links live for publishedImageTTL and land in chat histories that
+// outlive it, so the old shape keeps resolving.
+const PublishedImageLegacyPathPrefix = "/cursor-images/"
+
+// PublishedImageLegacyRoute is the router pattern matching the legacy prefix.
+const PublishedImageLegacyRoute = PublishedImageLegacyPathPrefix + ":name"
+
 // PublishedImageName returns the file name in a published image path, or "" if
-// the path does not address a published image. Both prefixes are recognised,
-// and a leading segment is tolerated so a client configured with a base URL
-// that carries a path still resolves the image.
+// the path does not address a published image. Every served prefix is
+// recognised, and a leading segment is tolerated so a client configured with a
+// base URL that carries a path still resolves the image.
 func PublishedImageName(urlPath string) string {
-	for _, prefix := range []string{PublishedImageAPIPathPrefix, PublishedImagePathPrefix} {
+	for _, prefix := range []string{PublishedImagePathPrefix, PublishedImageAPIPathPrefix, PublishedImageLegacyPathPrefix} {
 		idx := strings.Index(urlPath, prefix)
 		if idx < 0 {
 			continue

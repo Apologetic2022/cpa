@@ -13,6 +13,12 @@ server {
     # An image link handed out over plain http still has to load: send it to
     # the origin every client can validate. /v1/images/ is deliberately not
     # redirected here — POST /v1/images/generations shares that prefix.
+    # /cursor-images/ is the prefix this gateway used before /media/; links
+    # already in a chat history keep resolving until their bytes expire.
+    location ^~ /media/ {
+        return 301 https://0fcc5ed6.sslip.io$request_uri;
+    }
+
     location ^~ /cursor-images/ {
         return 301 https://0fcc5ed6.sslip.io$request_uri;
     }

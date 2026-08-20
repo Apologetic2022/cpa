@@ -23,12 +23,26 @@
 > 否则会被 `include sites-enabled/*` 加载并报 duplicate default server；本机备份放在
 > `/etc/nginx/site-backups/`。
 
+## 谁能出图
+
+出图只有两条入口：模型 `image`（`/v1/chat/completions`、`/v1/messages` 都可以点名
+它），以及 `/v1/images/generations`、`/v1/images/edits`。别的模型一律出不了图。
+
+拦截点在 Agent 协议本身，而不是事后过滤回复：Cursor 的服务端跑 GenerateImage 之前
+会先发一个 interaction query 等客户端批准，只有上面这两条入口开的会话才批准，其余
+会话回 rejected，模型转而用文字作答，也就不会消耗出图额度。万一还是有图送到，非
+image 模型的回复里也会把它丢掉。
+
+模型对外只叫 `image`；以前的 `cursor-image` 不再注册，也不会出现在 `/v1/models` 里。
+
 ## 生成图片的对外地址
 
-Cursor 生成的图片由网关自己托管在 `GET /cursor-images/<随机名>.png`（无需 API key，
-URL 本身即凭据，72 小时过期）。聊天回复里给出的是这个 URL，而不是 data URL——客户端的
-markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`，表现就是
-`[Image blocked: …]`。
+生成的图片由网关自己托管在 `GET /media/<随机名>.png`（无需 API key，URL 本身即凭据，
+24 小时过期）。聊天回复里给出的是这个 URL，而不是 data URL——客户端的 markdown 净化器
+（harden-react-markdown / streamdown）一律拒绝 `data:`，表现就是 `[Image blocked: …]`。
+
+路径里不出现供应商名字：链接每次出图都会展示给用户。`/cursor-images/` 是换名之前的
+前缀，仍然照常服务，旧对话里的链接在字节过期前都还能打开。
 
 对外地址默认取自入站请求的 `Host` + `X-Forwarded-Proto`，但本机 443 的默认证书是给裸 IP
 签的自签证书：客户端渲染器/Node 侧再去抓这个图就会报 `DEPTH_ZERO_SELF_SIGNED_CERT`。
@@ -43,15 +57,15 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
 - 生成图只保留 24 小时：网关自带清理协程，启动时先扫一遍，之后每小时扫一次，
   删掉 `/opt/cli-proxy/image-cache` 里超过一天的文件，不需要 cron 或 systemd timer。
 - 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `link`：正文里是
-  `![](https://0fcc5ed6.sslip.io/cursor-images/xxx.png)`，网关把 base64 解码后
+  `![](https://0fcc5ed6.sslip.io/media/xxx.png)`，网关把 base64 解码后
   的原始字节以 `Content-Type: image/png` 返回，客户端请求到的就是图片本身。
   主机名是本机 IP 的十六进制写法（`0f cc 5e d6` = 15.204.94.214），走
   sslip.io 通配 DNS 解析到同一台机器，单独签了 Let's Encrypt 证书，所以正文
   里看不出地址，客户端又能正常校验证书。
-  图片路由 `/cursor-images/:name` 和 `/v1/images/:name` 都不走 API key 中间件
-  （`<img>` 不会带凭证），文件名是 128 bit 随机值，URL 本身就是凭证；
-  同时带 `Access-Control-Allow-Origin: *` 和 `Cross-Origin-Resource-Policy:
-  cross-origin`，客户端要 fetch 成 blob 也读得到。
+  图片路由 `/media/:name`、`/v1/images/:name` 和旧的 `/cursor-images/:name`
+  都不走 API key 中间件（`<img>` 不会带凭证），文件名是 128 bit 随机值，
+  URL 本身就是凭证；同时带 `Access-Control-Allow-Origin: *` 和
+  `Cross-Origin-Resource-Policy: cross-origin`，客户端要 fetch 成 blob 也读得到。
   其余取值：`relative`（只给 `/v1/images/xxx.png`）、`base64`（data URL 写进
   markdown）。
 - 三种"不暴露地址"的交付都实测失败过，别再走回头路：
@@ -71,7 +85,8 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
     各类 *_tool_result），严格校验 SSE 的客户端会直接
     `Type validation failed … No matching discriminator`，整轮对话报错中断。
     所以 assistant 回复只能"指向"一张图，不能"携带"一张图。
-- 80 端口对 `/cursor-images/` 做 301，把换证书之前发出去的旧链接也导到受信任域名。
+- 80 端口对 `/media/` 和旧的 `/cursor-images/` 都做 301，把明文发出去的链接导到
+  受信任域名。
 - 续期由 `certbot.timer` 负责，`renewal-hooks/deploy/reload-nginx.sh` 在续期后 reload nginx。
   换成自有域名后，改 drop-in 里的地址 + 新签一张证书即可。
 

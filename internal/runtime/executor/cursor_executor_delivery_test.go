@@ -66,7 +66,7 @@ func TestCursorImageURLsInlineHidesOrigin(t *testing.T) {
 	if !strings.HasPrefix(urls[0], "data:image/") {
 		t.Fatalf("expected a data URL, got %q", urls[0])
 	}
-	if strings.Contains(urls[0], "gw.example.com") || strings.Contains(urls[0], "/cursor-images/") {
+	if strings.Contains(urls[0], "gw.example.com") || strings.Contains(urls[0], cursorlib.PublishedImagePathPrefix) {
 		t.Fatalf("inline url leaks the origin: %q", urls[0])
 	}
 	payload := urls[0][strings.Index(urls[0], ",")+1:]
@@ -99,7 +99,7 @@ func TestRenderGeneratedImagesInlineLeavesNoOrigin(t *testing.T) {
 	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}}
 	urls := cursorImageURLs("https://15-204-94-214.sslip.io", imgs)
 	text := renderGeneratedImages(`成品如下：<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/cat.png" />`, imgs, urls)
-	for _, leak := range []string{"sslip.io", "15.204.94.214", "/cursor-images/"} {
+	for _, leak := range []string{"sslip.io", "15.204.94.214", cursorlib.PublishedImagePathPrefix} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("reply still exposes %q: %s", leak, text)
 		}
@@ -151,7 +151,7 @@ func TestLinkDeliveryHidesAddressBehindTheImage(t *testing.T) {
 		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
 	urls := cursorImageURLs("https://gw.example.com", result.Images)
-	content := gjson.GetBytes(buildOpenAIChatCompletion("cursor-image", result, urls), "choices.0.message.content").String()
+	content := gjson.GetBytes(buildOpenAIChatCompletion("image", result, urls), "choices.0.message.content").String()
 
 	if !strings.Contains(content, "![Generated image](https://gw.example.com"+cursorlib.PublishedImagePathPrefix) {
 		t.Fatalf("image is not rendered as a link: %q", content)
@@ -162,6 +162,38 @@ func TestLinkDeliveryHidesAddressBehindTheImage(t *testing.T) {
 	prose := markdownImagePattern.ReplaceAllString(content, "")
 	if strings.Contains(prose, "gw.example.com") || strings.Contains(prose, cursorlib.PublishedImagePathPrefix) {
 		t.Fatalf("address shows up as visible text: %q", prose)
+	}
+}
+
+// Image generation is a property of the model, not of the prompt: a chat on
+// any other model must not reach the image tool.
+func TestOnlyTheImageModelMayGenerate(t *testing.T) {
+	if !isImageModel("image") || !isImageModel("Image") {
+		t.Fatal("the image model cannot generate images")
+	}
+	for _, model := range []string{"grok-4.6", "claude-4.6-sonnet", "default", "gpt-5.4", "cursor-image", "image-2"} {
+		if isImageModel(model) {
+			t.Fatalf("%q is allowed to generate images", model)
+		}
+	}
+}
+
+// The link is visible in every reply that carries an image, so no served
+// prefix may name the provider sitting behind this gateway.
+func TestPublishedImagePathNamesNoProvider(t *testing.T) {
+	t.Setenv(imageDeliveryEnv, "link")
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png"}}
+	urls := cursorImageURLs("https://gw.example.com", imgs)
+	if len(urls) != 1 {
+		t.Fatalf("expected one url, got %#v", urls)
+	}
+	if strings.Contains(strings.ToLower(urls[0]), "cursor") {
+		t.Fatalf("published url names the provider: %q", urls[0])
+	}
+	for _, prefix := range []string{cursorlib.PublishedImagePathPrefix, cursorlib.PublishedImageAPIPathPrefix} {
+		if strings.Contains(strings.ToLower(prefix), "cursor") {
+			t.Fatalf("served prefix names the provider: %q", prefix)
+		}
 	}
 }
 

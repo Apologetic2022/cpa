@@ -92,11 +92,29 @@ func TestGeneratedImageServedUnderAClientBasePathPrefix(t *testing.T) {
 	}
 }
 
+// Links handed out before the prefix changed live in chat histories, so the
+// old shape has to keep resolving for as long as the bytes are cached.
+func TestGeneratedImageServedUnderLegacyPrefix(t *testing.T) {
+	server := newTestServer(t)
+	name := path.Base(cursorlib.PublishImageBytes(testGeneratedPNG, "image/png"))
+
+	req := httptest.NewRequest(http.MethodGet, cursorlib.PublishedImageLegacyPathPrefix+name, nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("legacy path returned %d: %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Equal(rr.Body.Bytes(), testGeneratedPNG) {
+		t.Fatalf("legacy path served different bytes")
+	}
+}
+
 func TestUnrelatedPathsStillFourOhFour(t *testing.T) {
 	server := newTestServer(t)
 	for _, requestPath := range []string{
 		"/v1/images/../../etc/passwd",
-		"/cursor-images/",
+		cursorlib.PublishedImagePathPrefix,
 		"/v1/images/not-a-published-name",
 		"/totally/unrelated",
 	} {

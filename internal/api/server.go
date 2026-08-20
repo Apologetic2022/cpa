@@ -519,6 +519,8 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD(cursorlib.PublishedImageRoute, serveGeneratedImage)
 	s.engine.GET(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
 	s.engine.HEAD(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
+	s.engine.GET(cursorlib.PublishedImageLegacyRoute, serveGeneratedImage)
+	s.engine.HEAD(cursorlib.PublishedImageLegacyRoute, serveGeneratedImage)
 	cursorlib.StartPublishedImageJanitor()
 
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
