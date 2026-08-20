@@ -108,6 +108,7 @@ type Session struct {
 	events       chan StreamEvent
 	errCh        chan error
 	closed       bool
+	finished     bool
 	waitingTools bool
 	pauseCh      chan struct{}
 	cancel       context.CancelFunc
@@ -341,6 +342,7 @@ func (s *Session) readLoop(ctx context.Context) {
 							return
 						}
 					}
+					s.markFinished()
 					s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 					_ = s.closeWith("upstream_end_stream")
 					return
@@ -365,6 +367,7 @@ func (s *Session) readLoop(ctx context.Context) {
 			}
 		}
 		if errRead == io.EOF {
+			s.markFinished()
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 			_ = s.closeWith("upstream_eof")
 			return
@@ -413,8 +416,26 @@ func (s *Session) emit(ev StreamEvent) {
 	}
 }
 
+// markFinished records that the turn delivered its terminal event. Tearing the
+// Agent stream down afterwards makes the in-flight read fail with "http2:
+// response body closed", and reporting that would turn a complete answer into
+// a failed one.
+func (s *Session) markFinished() {
+	s.mu.Lock()
+	s.finished = true
+	s.mu.Unlock()
+}
+
 func (s *Session) fail(err error) {
 	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	finished := s.finished
+	s.mu.Unlock()
+	if finished {
+		log.Debugf("cursor session torn down after a finished turn: id=%s err=%v", s.ID, err)
+		_ = s.closeWith("teardown")
 		return
 	}
 	select {
@@ -660,6 +681,7 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 				ev.ReasoningTokens = *u.TurnEnded.ReasoningTokens
 			}
 			s.emit(ev)
+			s.markFinished()
 			s.emit(StreamEvent{Type: "segment_end", Reason: "stop"})
 			go func() { _ = s.closeWith("turn_ended") }()
 		case *agentv1.InteractionUpdate_ToolCallCompleted:
