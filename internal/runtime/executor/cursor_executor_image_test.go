@@ -293,45 +293,113 @@ func TestBuildCursorImagesResponse(t *testing.T) {
 	}
 }
 
-func TestInlineGeneratedImagesRewritesLocalPath(t *testing.T) {
-	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/portrait-woman.png"}}
+// hostedURLs is the URL list the executor would build for a run's images.
+func hostedURLs(t *testing.T, base string, imgs []cursorlib.GeneratedImage) []string {
+	t.Helper()
+	return cursorImageURLs(base, imgs)
+}
+
+func TestRenderGeneratedImagesRewritesLocalPathToHostedURL(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/portrait-woman.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
 	text := `已经生成一张写实肖像。<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/portrait-woman.png" alt="Generated image" />后续可继续调整。`
 
-	got := inlineGeneratedImages(text, imgs)
+	got := renderGeneratedImages(text, imgs, urls)
 	if strings.Contains(got, "/home/cliproxy") {
 		t.Fatalf("local path survived rewrite: %q", got)
 	}
-	if !strings.Contains(got, `src="data:image/png;base64,QUJD"`) {
-		t.Fatalf("data URL not inlined: %q", got)
+	// A data URL is what the client's markdown sanitizer blocks, so the
+	// rewritten reference must be a fetchable link instead.
+	if strings.Contains(got, "data:image/png") {
+		t.Fatalf("data URL leaked into content: %q", got)
 	}
-	// Surrounding prose and other attributes must be preserved.
+	if !strings.Contains(got, "!["+"Generated image"+"](https://gw.example.com/cursor-images/") {
+		t.Fatalf("hosted markdown image missing: %q", got)
+	}
 	if !strings.Contains(got, "已经生成一张写实肖像。") || !strings.Contains(got, "后续可继续调整。") {
 		t.Fatalf("surrounding text damaged: %q", got)
 	}
-	if !strings.Contains(got, `alt="Generated image"`) {
-		t.Fatalf("alt attribute lost: %q", got)
+}
+
+func TestRenderGeneratedImagesRewritesMarkdownLocalPath(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "portrait.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
+	text := "成品如下：\n\n![美女肖像](/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/portrait.png)\n"
+
+	got := renderGeneratedImages(text, imgs, urls)
+	if strings.Contains(got, "/home/cliproxy") {
+		t.Fatalf("local path survived rewrite: %q", got)
+	}
+	if !strings.Contains(got, "![美女肖像](https://gw.example.com/cursor-images/") {
+		t.Fatalf("alt text or hosted URL lost: %q", got)
 	}
 }
 
-func TestInlineGeneratedImagesFallsBackToOrder(t *testing.T) {
-	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "somewhere-else.png"}}
-	got := inlineGeneratedImages(`<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/unknown-name.png" />`, imgs)
-	if !strings.Contains(got, "data:image/png;base64,QUJD") {
+func TestRenderGeneratedImagesAppendsUnreferencedImage(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
+
+	got := renderGeneratedImages("图片已成功生成。", imgs, urls)
+	if !strings.HasPrefix(got, "图片已成功生成。") {
+		t.Fatalf("prose damaged: %q", got)
+	}
+	if !strings.Contains(got, "![Generated image](https://gw.example.com/cursor-images/") {
+		t.Fatalf("image not appended for a reply that never referenced it: %q", got)
+	}
+}
+
+func TestRenderGeneratedImagesFallsBackToOrder(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "somewhere-else.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
+	got := renderGeneratedImages(`<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/unknown-name.png" />`, imgs, urls)
+	if got != "!["+"Generated image"+"]("+urls[0]+")" {
 		t.Fatalf("expected order fallback, got %q", got)
 	}
 }
 
-func TestInlineGeneratedImagesLeavesAddressableSources(t *testing.T) {
-	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "a.png"}}
+func TestRenderGeneratedImagesLeavesAddressableSources(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "a.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
 	for _, src := range []string{"data:image/png;base64,ZZZ", "https://example.com/a.png"} {
 		text := `<img src="` + src + `" />`
-		if got := inlineGeneratedImages(text, imgs); got != text {
+		got := renderGeneratedImages(text, imgs, urls)
+		if !strings.HasPrefix(got, text) {
 			t.Fatalf("rewrote an already-addressable src %q -> %q", src, got)
 		}
 	}
 	// No images at all must be a no-op rather than a panic.
-	if got := inlineGeneratedImages(`<img src="/x.png" />`, nil); got != `<img src="/x.png" />` {
+	if got := renderGeneratedImages(`<img src="/x.png" />`, nil, nil); got != `<img src="/x.png" />` {
 		t.Fatalf("unexpected rewrite without images: %q", got)
+	}
+}
+
+func TestCursorImageURLsFallsBackToDataURLWithoutOrigin(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png"}}
+	if got := cursorImageURLs("", imgs); len(got) != 1 || got[0] != "data:image/png;base64,QUJD" {
+		t.Fatalf("expected data URL fallback, got %#v", got)
+	}
+}
+
+func TestCursorImageURLsServesHostedBytes(t *testing.T) {
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png"}}
+	urls := cursorImageURLs("https://gw.example.com", imgs)
+	if len(urls) != 1 || !strings.HasPrefix(urls[0], "https://gw.example.com/cursor-images/") {
+		t.Fatalf("unexpected hosted url: %#v", urls)
+	}
+	name := strings.TrimPrefix(urls[0], "https://gw.example.com/cursor-images/")
+	data, mime, ok := cursorlib.LookupPublishedImage(name)
+	if !ok {
+		t.Fatalf("hosted image %q is not served back", name)
+	}
+	if mime != "image/png" {
+		t.Fatalf("unexpected mime %q", mime)
+	}
+	want, _ := base64.StdEncoding.DecodeString(testPNGBase64)
+	if !bytes.Equal(data, want) {
+		t.Fatalf("hosted bytes differ from the generated image")
+	}
+	if !strings.HasSuffix(name, ".png") {
+		t.Fatalf("hosted name should carry the image extension: %q", name)
 	}
 }
 
@@ -356,13 +424,14 @@ func TestStreamImgFilterDropsTagAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestInlineGeneratedImagesLeavesUnrelatedLocalPaths(t *testing.T) {
+func TestRenderGeneratedImagesLeavesUnrelatedLocalPaths(t *testing.T) {
 	// A model writing HTML must keep its own relative/absolute paths, even in a
 	// turn that also produced an image.
-	imgs := []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}}
+	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}}
+	urls := hostedURLs(t, "https://gw.example.com", imgs)
 	for _, src := range []string{"./logo.png", "/var/www/assets/hero.jpg", "images/icon.svg"} {
 		text := `<img src="` + src + `" />`
-		if got := inlineGeneratedImages(text, imgs); got != text {
+		if got := renderGeneratedImages(text, imgs, urls); !strings.HasPrefix(got, text) {
 			t.Fatalf("rewrote an unrelated path %q -> %q", src, got)
 		}
 	}
@@ -407,6 +476,40 @@ func TestStreamImgFilterPassesPlainText(t *testing.T) {
 	}
 }
 
+func TestStreamImgFilterDropsMarkdownLocalPathAcrossChunks(t *testing.T) {
+	var f streamImgFilter
+	chunks := []string{
+		"图片如下：",
+		"![美女肖",
+		"像](/home/cliproxy/.cursor/projects/cliproxy-cursor",
+		"-workspace/assets/portrait.png)",
+		"需要修改直接说。",
+	}
+	var got strings.Builder
+	for _, c := range chunks {
+		got.WriteString(f.Feed(c))
+	}
+	got.WriteString(f.Flush())
+	if want := "图片如下：需要修改直接说。"; got.String() != want {
+		t.Fatalf("filtered text = %q, want %q", got.String(), want)
+	}
+}
+
+func TestStreamImgFilterKeepsUnrelatedMarkdown(t *testing.T) {
+	for _, text := range []string{
+		"![cat](https://example.com/cat.png)",
+		"![local](./cat.png)",
+		"see ![](/var/www/a.png) here",
+		"警告! [链接](https://example.com) 结束",
+		"纯文本 ! 感叹号",
+	} {
+		var f streamImgFilter
+		if got := f.Feed(text) + f.Flush(); got != text {
+			t.Fatalf("filter altered %q -> %q", text, got)
+		}
+	}
+}
+
 func TestStreamImgFilterDropsUnterminatedTag(t *testing.T) {
 	var f streamImgFilter
 	out := f.Feed(`done.<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/a.png"`)
@@ -416,21 +519,22 @@ func TestStreamImgFilterDropsUnterminatedTag(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIChatCompletionInlinesImageInContent(t *testing.T) {
+func TestBuildOpenAIChatCompletionLinksImageInContent(t *testing.T) {
 	result := &cursorlib.ChatResult{
 		Text:   `here you go<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/assets/cat.png" alt="Generated image" />`,
-		Images: []cursorlib.GeneratedImage{{Base64: "QUJD", MimeType: "image/png", FilePath: "cat.png"}},
+		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result)
+	urls := hostedURLs(t, "https://gw.example.com", result.Images)
+	payload := buildOpenAIChatCompletion("cursor-image", result, urls)
 	content := gjson.GetBytes(payload, "choices.0.message.content").String()
 	if strings.Contains(content, "/home/cliproxy") {
 		t.Fatalf("content still points at a nonexistent path: %q", content)
 	}
-	if !strings.Contains(content, "data:image/png;base64,QUJD") {
-		t.Fatalf("content missing inline image: %q", content)
+	if !strings.Contains(content, "![Generated image]("+urls[0]+")") {
+		t.Fatalf("content missing hosted image: %q", content)
 	}
 	// The images array stays populated for clients that read it instead.
-	if gjson.GetBytes(payload, "choices.0.message.images.0.image_url.url").String() != "data:image/png;base64,QUJD" {
+	if gjson.GetBytes(payload, "choices.0.message.images.0.image_url.url").String() != urls[0] {
 		t.Fatalf("images array lost: %s", payload)
 	}
 }
@@ -442,7 +546,7 @@ func TestBuildOpenAIChatCompletionIncludesImages(t *testing.T) {
 			{Base64: "QUJD", MimeType: "image/png"},
 		},
 	}
-	payload := buildOpenAIChatCompletion("cursor-image", result)
+	payload := buildOpenAIChatCompletion("cursor-image", result, cursorImageURLs("", result.Images))
 	images := gjson.GetBytes(payload, "choices.0.message.images")
 	if !images.IsArray() || len(images.Array()) != 1 {
 		t.Fatalf("missing images array: %s", payload)

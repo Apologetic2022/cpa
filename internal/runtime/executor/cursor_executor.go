@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -116,7 +117,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	outPayload := buildOpenAIChatCompletion(req.Model, result)
+	outPayload := buildOpenAIChatCompletion(req.Model, result, cursorImageURLs(cursorPublicBaseURL(opts), result.Images))
 	reporter.Publish(ctx, usage.Detail{
 		InputTokens:     result.InputTokens,
 		OutputTokens:    result.OutputTokens,
@@ -189,6 +190,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	imageBaseURL := cursorPublicBaseURL(opts)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -257,11 +259,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if ev.Image == nil {
 					return nil
 				}
-				// Inline the image in the text too: clients that render only
-				// content would otherwise show nothing, since the path Cursor
-				// reports does not exist on a headless relay.
+				// Put the image in the text too: protocols such as Anthropic
+				// messages carry no image blocks in an assistant reply, so the
+				// markdown link is the only way the caller ever sees it.
+				url := cursorImageURL(imageBaseURL, *ev.Image)
 				if !emitDelta(map[string]any{
-					"content": `<img src="` + ev.Image.DataURL() + `" alt="Generated image" />`,
+					"content": "\n\n" + markdownImage(generatedImageAlt, url) + "\n\n",
 				}) {
 					return context.Canceled
 				}
@@ -270,7 +273,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						{
 							"index":     imageIndex,
 							"type":      "image_url",
-							"image_url": map[string]any{"url": ev.Image.DataURL()},
+							"image_url": map[string]any{"url": url},
 						},
 					},
 				}
@@ -977,49 +980,157 @@ func extractTools(body []byte) []cursorlib.ToolDefinition {
 // swapped without disturbing the rest of the tag.
 var imgSrcPattern = regexp.MustCompile(`(?is)(<img\b[^>]*?\bsrc=")([^"]*)("[^>]*>)`)
 
-// inlineGeneratedImages rewrites the assistant's <img> tags so the rendered
-// text actually shows the image. Cursor reports the path its desktop client
-// would have saved to, which never exists for a headless relay, so a client
-// that renders the content verbatim gets a broken image. Only workspace paths
-// are touched; tags are matched to the run's images by file name and fall back
-// to arrival order.
-func inlineGeneratedImages(text string, images []cursorlib.GeneratedImage) string {
-	if text == "" || len(images) == 0 {
-		return text
+// imgAltPattern reads the alt text off an <img> tag.
+var imgAltPattern = regexp.MustCompile(`(?is)\balt="([^"]*)"`)
+
+// markdownImagePattern matches a markdown image whose target has no spaces,
+// which is the shape a model uses when it echoes a generated file path.
+var markdownImagePattern = regexp.MustCompile(`!\[([^\]\n]*)\]\(([^)\s]+)\)`)
+
+// generatedImageAlt is the alt text used for images this proxy inserts itself.
+const generatedImageAlt = "Generated image"
+
+// cursorImageURLs hosts a run's generated images and returns one URL per
+// image, in order. Hosting is preferred over a data URL because chat clients
+// sanitise assistant markdown before rendering it and the common sanitisers
+// reject data: URLs outright, which is what surfaces as "[Image blocked: …]".
+// Without a known origin there is nothing to link to, so the data URL stands.
+func cursorImageURLs(baseURL string, images []cursorlib.GeneratedImage) []string {
+	if len(images) == 0 {
+		return nil
 	}
-	byName := make(map[string]string, len(images))
-	for _, img := range images {
-		if name := path.Base(strings.TrimSpace(img.FilePath)); name != "" && name != "." && name != "/" {
-			byName[name] = img.DataURL()
+	urls := make([]string, len(images))
+	for i, img := range images {
+		urls[i] = img.DataURL()
+		if baseURL == "" {
+			continue
+		}
+		if hosted := cursorlib.PublishGeneratedImage(img); hosted != "" {
+			urls[i] = baseURL + hosted
 		}
 	}
-	next := 0
-	return imgSrcPattern.ReplaceAllStringFunc(text, func(tag string) string {
-		groups := imgSrcPattern.FindStringSubmatch(tag)
-		src := strings.TrimSpace(groups[2])
-		if !cursorlib.IsHeadlessWorkspacePath(src) {
-			return tag
-		}
-		if url, ok := byName[path.Base(src)]; ok {
-			return groups[1] + url + groups[3]
-		}
-		if next < len(images) {
-			url := images[next].DataURL()
-			next++
-			return groups[1] + url + groups[3]
-		}
-		return tag
-	})
+	return urls
 }
 
-// imgOpenPattern locates the start of an <img> tag, case-insensitively.
-var imgOpenPattern = regexp.MustCompile(`(?i)<img`)
+// cursorImageURL hosts a single generated image and returns its URL.
+func cursorImageURL(baseURL string, img cursorlib.GeneratedImage) string {
+	return cursorImageURLs(baseURL, []cursorlib.GeneratedImage{img})[0]
+}
+
+// cursorPublicBaseURL reports the origin generated images should be served
+// from. The inbound request is the source of truth — it is by definition an
+// address the caller can reach — but a deployment whose reverse proxy rewrites
+// the Host header can pin it explicitly instead.
+func cursorPublicBaseURL(opts cliproxyexecutor.Options) string {
+	if override := strings.TrimSpace(os.Getenv("CPA_PUBLIC_BASE_URL")); override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if opts.Metadata == nil {
+		return ""
+	}
+	value, _ := opts.Metadata[cliproxyexecutor.RequestBaseURLMetadataKey].(string)
+	return strings.TrimRight(strings.TrimSpace(value), "/")
+}
+
+// renderGeneratedImages rewrites the assistant's image references so the
+// rendered text actually shows the image, and appends the ones the model never
+// referenced. Cursor reports the path its desktop client would have saved to,
+// which neither exists on a headless relay nor renders in a chat client, so
+// every reference to such a path is replaced by a markdown image pointing at
+// the hosted copy. References are matched to images by file name and fall back
+// to arrival order; anything outside the advertised workspace is left alone.
+func renderGeneratedImages(text string, images []cursorlib.GeneratedImage, urls []string) string {
+	if len(images) == 0 || len(urls) != len(images) {
+		return text
+	}
+	byName := make(map[string]int, len(images))
+	for i, img := range images {
+		if name := path.Base(strings.TrimSpace(img.FilePath)); name != "" && name != "." && name != "/" {
+			byName[name] = i
+		}
+	}
+	used := make([]bool, len(images))
+	next := 0
+	// resolve returns the URL to render for one local path reference.
+	resolve := func(src string) (string, bool) {
+		if !cursorlib.IsHeadlessWorkspacePath(src) {
+			return "", false
+		}
+		if idx, ok := byName[path.Base(src)]; ok && !used[idx] {
+			used[idx] = true
+			return urls[idx], true
+		}
+		for next < len(images) && used[next] {
+			next++
+		}
+		if next < len(images) {
+			used[next] = true
+			return urls[next], true
+		}
+		return "", false
+	}
+
+	out := markdownImagePattern.ReplaceAllStringFunc(text, func(ref string) string {
+		groups := markdownImagePattern.FindStringSubmatch(ref)
+		url, ok := resolve(strings.TrimSpace(groups[2]))
+		if !ok {
+			return ref
+		}
+		return markdownImage(groups[1], url)
+	})
+	out = imgSrcPattern.ReplaceAllStringFunc(out, func(tag string) string {
+		groups := imgSrcPattern.FindStringSubmatch(tag)
+		url, ok := resolve(strings.TrimSpace(groups[2]))
+		if !ok {
+			return tag
+		}
+		return markdownImage(imgTagAlt(tag), url)
+	})
+
+	var appended strings.Builder
+	for i := range images {
+		if used[i] {
+			continue
+		}
+		appended.WriteString("\n\n")
+		appended.WriteString(markdownImage(generatedImageAlt, urls[i]))
+	}
+	if appended.Len() == 0 {
+		return out
+	}
+	return strings.TrimRight(out, " \t\r\n") + appended.String()
+}
+
+// markdownImage renders an image reference in markdown rather than HTML: chat
+// clients routinely strip raw HTML, and markdown is what their renderers read.
+func markdownImage(alt, url string) string {
+	alt = strings.TrimSpace(strings.NewReplacer("[", "", "]", "", "\n", " ").Replace(alt))
+	if alt == "" {
+		alt = generatedImageAlt
+	}
+	return "![" + alt + "](" + url + ")"
+}
+
+func imgTagAlt(tag string) string {
+	if groups := imgAltPattern.FindStringSubmatch(tag); groups != nil {
+		return groups[1]
+	}
+	return generatedImageAlt
+}
+
+// imgRefStartPattern locates the start of either image syntax a model may use.
+var imgRefStartPattern = regexp.MustCompile(`(?i)<img|!\[`)
+
+// streamImgRefMaxHold bounds how much text is buffered waiting for an image
+// reference to close. Past that the candidate is almost certainly ordinary
+// prose (a stray "![", say) and holding it back would stall the stream.
+const streamImgRefMaxHold = 8192
 
 // keepImgTag reports whether a complete <img> tag can stay in the streamed
 // text. Only tags naming a file in the client's own advertised workspace are
-// dropped — those never resolve for the caller, and the image is re-emitted
-// inline from the image event once the bytes are known. Everything else,
-// including HTML a model merely quotes, is left verbatim.
+// dropped — those never resolve for the caller, and the image is re-emitted as
+// a hosted markdown image once the bytes are known. Everything else, including
+// HTML a model merely quotes, is left verbatim.
 func keepImgTag(tag string) bool {
 	groups := imgSrcPattern.FindStringSubmatch(tag)
 	if groups == nil {
@@ -1028,9 +1139,10 @@ func keepImgTag(tag string) bool {
 	return !cursorlib.IsHeadlessWorkspacePath(groups[2])
 }
 
-// streamImgFilter removes the assistant's dangling local-path <img> tags from
-// streamed text. A tag can straddle chunk boundaries, so any tail that could
-// still grow into one is held back until it completes.
+// streamImgFilter removes the assistant's local-path image references from
+// streamed text, in both markdown and HTML form. A reference can straddle
+// chunk boundaries, so any tail that could still grow into one is held back
+// until it completes.
 type streamImgFilter struct {
 	pending string
 }
@@ -1040,24 +1152,28 @@ func (f *streamImgFilter) Feed(chunk string) string {
 	buf := f.pending + chunk
 	var out strings.Builder
 	for {
-		loc := imgOpenPattern.FindStringIndex(buf)
+		loc := imgRefStartPattern.FindStringIndex(buf)
 		if loc == nil {
 			break
 		}
 		out.WriteString(buf[:loc[0]])
 		rest := buf[loc[0]:]
-		end := strings.IndexByte(rest, '>')
-		if end < 0 {
-			// Tag still open; keep it buffered until the closing bracket lands.
-			f.pending = rest
-			return out.String()
+		emit, remainder, incomplete := consumeImageRef(rest)
+		if incomplete {
+			if len(rest) <= streamImgRefMaxHold {
+				f.pending = rest
+				return out.String()
+			}
+			// Too long to still be a reference: release the opening marker and
+			// keep scanning after it.
+			out.WriteString(rest[:2])
+			buf = rest[2:]
+			continue
 		}
-		if tag := rest[:end+1]; keepImgTag(tag) {
-			out.WriteString(tag)
-		}
-		buf = rest[end+1:]
+		out.WriteString(emit)
+		buf = remainder
 	}
-	// No tag in flight: hold back only a tail that could begin one.
+	// No reference in flight: hold back only a tail that could begin one.
 	hold := 0
 	for n := 4; n > 0; n-- {
 		if len(buf) >= n && strings.EqualFold(buf[len(buf)-n:], "<img"[:n]) {
@@ -1065,23 +1181,61 @@ func (f *streamImgFilter) Feed(chunk string) string {
 			break
 		}
 	}
+	if hold == 0 && strings.HasSuffix(buf, "!") {
+		hold = 1
+	}
 	out.WriteString(buf[:len(buf)-hold])
 	f.pending = buf[len(buf)-hold:]
 	return out.String()
 }
 
-// Flush returns any buffered text at end of stream, dropping a tag that never
-// closed rather than leaking a broken path to the caller.
+// consumeImageRef inspects text starting at an image reference marker. It
+// returns the text to emit for that reference, the remaining input, and
+// whether the reference is still incomplete and must be buffered.
+func consumeImageRef(s string) (emit, rest string, incomplete bool) {
+	if strings.HasPrefix(s, "![") {
+		bracket := strings.IndexByte(s, ']')
+		if bracket < 0 || bracket+1 >= len(s) {
+			return "", "", true
+		}
+		if s[bracket+1] != '(' {
+			// Not an image after all: a plain "![…]" run of text.
+			return s[:bracket+1], s[bracket+1:], false
+		}
+		end := strings.IndexByte(s[bracket+2:], ')')
+		if end < 0 {
+			return "", "", true
+		}
+		end += bracket + 2
+		target := strings.Fields(s[bracket+2 : end])
+		if len(target) > 0 && cursorlib.IsHeadlessWorkspacePath(target[0]) {
+			return "", s[end+1:], false
+		}
+		return s[:end+1], s[end+1:], false
+	}
+	end := strings.IndexByte(s, '>')
+	if end < 0 {
+		return "", "", true
+	}
+	tag := s[:end+1]
+	if keepImgTag(tag) {
+		return tag, s[end+1:], false
+	}
+	return "", s[end+1:], false
+}
+
+// Flush returns any buffered text at end of stream, dropping a reference that
+// never closed rather than leaking a broken path to the caller.
 func (f *streamImgFilter) Flush() string {
 	buf := f.pending
 	f.pending = ""
-	if loc := imgOpenPattern.FindStringIndex(buf); loc != nil {
+	if loc := imgRefStartPattern.FindStringIndex(buf); loc != nil {
 		return buf[:loc[0]]
 	}
 	return buf
 }
 
-func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byte {
+func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult, imageURLs []string) []byte {
 	id := "chatcmpl-" + uuid.NewString()
 	finish := result.FinishReason
 	if finish == "" {
@@ -1089,18 +1243,18 @@ func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult) []byt
 	}
 	message := map[string]any{
 		"role":    "assistant",
-		"content": inlineGeneratedImages(result.Text, result.Images),
+		"content": renderGeneratedImages(result.Text, result.Images, imageURLs),
 	}
 	if result.Thinking != "" {
 		message["reasoning_content"] = result.Thinking
 	}
-	if len(result.Images) > 0 {
+	if len(imageURLs) == len(result.Images) && len(result.Images) > 0 {
 		images := make([]map[string]any, 0, len(result.Images))
-		for i, img := range result.Images {
+		for i := range result.Images {
 			images = append(images, map[string]any{
 				"index":     i,
 				"type":      "image_url",
-				"image_url": map[string]any{"url": img.DataURL()},
+				"image_url": map[string]any{"url": imageURLs[i]},
 			})
 		}
 		message["images"] = images
