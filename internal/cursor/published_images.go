@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,16 +24,21 @@ const PublishedImagePathPrefix = "/cursor-images/"
 const PublishedImageRoute = PublishedImagePathPrefix + ":name"
 
 const (
-	// publishedImageTTL bounds how long a hosted image stays fetchable. It has
-	// to outlive the turn that produced it, because a client re-renders the
-	// whole transcript whenever the conversation is reopened.
-	publishedImageTTL = 12 * time.Hour
-	// publishedImageMaxBytes and publishedImageMaxCount bound the store: it
-	// lives in the gateway's heap, so a long-running relay must not accumulate
-	// every image it has ever produced.
-	publishedImageMaxBytes = 192 << 20
-	publishedImageMaxCount = 256
+	// publishedImageTTL bounds how long a hosted image stays fetchable. A link
+	// sits in the client's transcript and is re-fetched every time that
+	// conversation is reopened, so it has to outlive the turn by a wide margin.
+	publishedImageTTL = 72 * time.Hour
+	// publishedImageMaxBytes caps the cache directory.
+	publishedImageMaxBytes = 2 << 30
+	// publishedImageMemoryBytes caps what is kept in the heap on top of that;
+	// the rest is served from disk.
+	publishedImageMemoryBytes = 128 << 20
 )
+
+// publishedImageDirEnv overrides where hosted images are cached. The default
+// lands under the user cache directory, which survives a restart — /tmp does
+// not when the unit runs with PrivateTmp.
+const publishedImageDirEnv = "CPA_IMAGE_CACHE_DIR"
 
 type publishedImage struct {
 	data    []byte
@@ -39,10 +47,14 @@ type publishedImage struct {
 }
 
 type publishedImageStore struct {
-	mu    sync.Mutex
-	items map[string]publishedImage
-	order []string
-	bytes int
+	mu sync.Mutex
+	// dir is the on-disk cache. Empty means memory-only, which is what the
+	// store falls back to when no directory can be created.
+	dir      string
+	dirReady bool
+	items    map[string]publishedImage
+	order    []string
+	bytes    int
 }
 
 var publishedImages = &publishedImageStore{items: make(map[string]publishedImage)}
@@ -93,47 +105,50 @@ func LookupPublishedImage(name string) ([]byte, string, bool) {
 func (s *publishedImageStore) put(name string, img publishedImage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.purgeExpiredLocked(time.Now())
+	s.writeFileLocked(name, img.data)
 	if _, exists := s.items[name]; exists {
 		return
 	}
 	s.items[name] = img
 	s.order = append(s.order, name)
 	s.bytes += len(img.data)
-	for len(s.order) > 0 && (len(s.order) > publishedImageMaxCount || s.bytes > publishedImageMaxBytes) {
-		s.dropLocked(s.order[0])
+	// Only the bytes are evicted from memory; the file stays fetchable.
+	for len(s.order) > 1 && s.bytes > publishedImageMemoryBytes {
+		s.forgetLocked(s.order[0])
 	}
 }
 
 func (s *publishedImageStore) get(name string) ([]byte, string, bool) {
-	if name == "" {
+	if !validPublishedImageName(name) {
 		return nil, "", false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	s.purgeExpiredLocked(now)
-	img, ok := s.items[name]
+	if img, ok := s.items[name]; ok {
+		if img.expires.After(now) {
+			if len(img.data) > 0 {
+				return img.data, img.mime, true
+			}
+		} else {
+			s.forgetLocked(name)
+			s.removeFileLocked(name)
+			return nil, "", false
+		}
+	}
+	data, ok := s.readFileLocked(name, now)
 	if !ok {
 		return nil, "", false
 	}
-	return img.data, img.mime, true
-}
-
-func (s *publishedImageStore) purgeExpiredLocked(now time.Time) {
-	for _, name := range s.order {
-		img, ok := s.items[name]
-		if !ok {
-			continue
-		}
-		if img.expires.After(now) {
-			break
-		}
-		s.dropLocked(name)
+	mime := normalizeImageMime(http.DetectContentType(data))
+	if mime == "" {
+		mime = "application/octet-stream"
 	}
+	return data, mime, true
 }
 
-func (s *publishedImageStore) dropLocked(name string) {
+// forgetLocked drops one entry's bytes from the heap, leaving the file behind.
+func (s *publishedImageStore) forgetLocked(name string) {
 	img, ok := s.items[name]
 	if !ok {
 		return
@@ -146,6 +161,129 @@ func (s *publishedImageStore) dropLocked(name string) {
 			break
 		}
 	}
+}
+
+// cacheDirLocked resolves the on-disk cache directory once per process.
+func (s *publishedImageStore) cacheDirLocked() string {
+	if s.dirReady {
+		return s.dir
+	}
+	s.dirReady = true
+	dir := strings.TrimSpace(os.Getenv(publishedImageDirEnv))
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil || strings.TrimSpace(base) == "" {
+			base = os.TempDir()
+		}
+		dir = filepath.Join(base, "cliproxy-api", "generated-images")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		s.dir = ""
+		return ""
+	}
+	s.dir = dir
+	return dir
+}
+
+func (s *publishedImageStore) writeFileLocked(name string, data []byte) {
+	dir := s.cacheDirLocked()
+	if dir == "" || !validPublishedImageName(name) {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+		return
+	}
+	s.pruneDirLocked(dir, time.Now())
+}
+
+func (s *publishedImageStore) readFileLocked(name string, now time.Time) ([]byte, bool) {
+	dir := s.cacheDirLocked()
+	if dir == "" {
+		return nil, false
+	}
+	path := filepath.Join(dir, name)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return nil, false
+	}
+	if now.Sub(info.ModTime()) > publishedImageTTL {
+		_ = os.Remove(path)
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
+func (s *publishedImageStore) removeFileLocked(name string) {
+	dir := s.cacheDirLocked()
+	if dir == "" || !validPublishedImageName(name) {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, name))
+}
+
+// pruneDirLocked drops expired files and, once the directory is over its size
+// cap, the oldest ones until it fits again.
+func (s *publishedImageStore) pruneDirLocked(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type cached struct {
+		name    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]cached, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) > publishedImageTTL {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			continue
+		}
+		files = append(files, cached{name: entry.Name(), size: info.Size(), modTime: info.ModTime()})
+		total += info.Size()
+	}
+	if total <= publishedImageMaxBytes {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
+	for _, file := range files {
+		if total <= publishedImageMaxBytes {
+			return
+		}
+		if err = os.Remove(filepath.Join(dir, file.name)); err == nil {
+			total -= file.size
+		}
+	}
+}
+
+// validPublishedImageName rejects anything that is not a name this store
+// generated, which is also what keeps a request from escaping the cache
+// directory.
+func validPublishedImageName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '.', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return !strings.Contains(name, "..")
 }
 
 // normalizeImageMime strips any parameters and rejects non-image types.

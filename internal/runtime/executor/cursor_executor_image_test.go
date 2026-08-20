@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -370,6 +371,24 @@ func TestRenderGeneratedImagesLeavesAddressableSources(t *testing.T) {
 	// No images at all must be a no-op rather than a panic.
 	if got := renderGeneratedImages(`<img src="/x.png" />`, nil, nil); got != `<img src="/x.png" />` {
 		t.Fatalf("unexpected rewrite without images: %q", got)
+	}
+}
+
+func TestCursorPublicBaseURLPrefersOperatorOverride(t *testing.T) {
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.RequestBaseURLMetadataKey: "https://15.204.94.214",
+	}}
+	if got := cursorPublicBaseURL(opts); got != "https://15.204.94.214" {
+		t.Fatalf("request origin ignored: %q", got)
+	}
+	// A gateway whose own certificate the client will not trust has to be able
+	// to hand out a different origin for the images it hosts.
+	t.Setenv("CPA_PUBLIC_BASE_URL", "https://gw.example.com/")
+	if got := cursorPublicBaseURL(opts); got != "https://gw.example.com" {
+		t.Fatalf("override ignored: %q", got)
+	}
+	if got := cursorPublicBaseURL(cliproxyexecutor.Options{}); got != "https://gw.example.com" {
+		t.Fatalf("override lost without metadata: %q", got)
 	}
 }
 

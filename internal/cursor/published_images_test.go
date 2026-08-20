@@ -3,6 +3,8 @@ package cursor
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,16 @@ var onePixelPNG = []byte{
 	0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
 	0x89, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
 	0x44, 0xAE, 0x42, 0x60, 0x82,
+}
+
+// newTestStore returns a store writing to a scratch directory.
+func newTestStore(t *testing.T) *publishedImageStore {
+	t.Helper()
+	return &publishedImageStore{
+		items:    make(map[string]publishedImage),
+		dir:      t.TempDir(),
+		dirReady: true,
+	}
 }
 
 func TestPublishGeneratedImageRoundTrip(t *testing.T) {
@@ -32,7 +44,7 @@ func TestPublishGeneratedImageRoundTrip(t *testing.T) {
 	if mime != "image/png" || !bytes.Equal(data, onePixelPNG) {
 		t.Fatalf("stored image differs: mime=%q len=%d", mime, len(data))
 	}
-	if _, _, ok = LookupPublishedImage("does-not-exist.png"); ok {
+	if _, _, ok = LookupPublishedImage("doesnotexist.png"); ok {
 		t.Fatal("unknown name resolved")
 	}
 }
@@ -54,26 +66,67 @@ func TestPublishImageBytesSniffsAndRejects(t *testing.T) {
 	}
 }
 
-func TestPublishedImageStoreEvictsAndExpires(t *testing.T) {
-	store := &publishedImageStore{items: make(map[string]publishedImage)}
-	future := time.Now().Add(time.Hour)
-	store.put("expired.png", publishedImage{data: []byte("a"), mime: "image/png", expires: time.Now().Add(-time.Minute)})
-	store.put("kept.png", publishedImage{data: []byte("b"), mime: "image/png", expires: future})
-	if _, _, ok := store.get("expired.png"); ok {
+func TestPublishedImageSurvivesMemoryEviction(t *testing.T) {
+	// A link sits in the client's transcript long after the bytes leave the
+	// heap, so the file has to answer on its own.
+	store := newTestStore(t)
+	store.put("kept.png", publishedImage{data: onePixelPNG, mime: "image/png", expires: time.Now().Add(time.Hour)})
+	store.forgetLocked("kept.png")
+	if _, ok := store.items["kept.png"]; ok {
+		t.Fatal("entry still in memory")
+	}
+	data, mime, ok := store.get("kept.png")
+	if !ok {
+		t.Fatal("image not served from disk after eviction")
+	}
+	if mime != "image/png" || !bytes.Equal(data, onePixelPNG) {
+		t.Fatalf("disk copy differs: mime=%q len=%d", mime, len(data))
+	}
+}
+
+func TestPublishedImageExpiresOnDisk(t *testing.T) {
+	store := newTestStore(t)
+	store.put("stale.png", publishedImage{data: onePixelPNG, mime: "image/png", expires: time.Now().Add(-time.Minute)})
+	old := time.Now().Add(-publishedImageTTL - time.Hour)
+	if err := os.Chtimes(filepath.Join(store.dir, "stale.png"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := store.get("stale.png"); ok {
 		t.Fatal("expired image still served")
 	}
-	if _, _, ok := store.get("kept.png"); !ok {
-		t.Fatal("live image dropped")
+	if _, err := os.Stat(filepath.Join(store.dir, "stale.png")); !os.IsNotExist(err) {
+		t.Fatalf("expired file not removed: %v", err)
 	}
+}
 
-	// The oldest entries go first once the store is over its limits.
-	for i := 0; i < publishedImageMaxCount+5; i++ {
-		store.put(string(rune('a'+i%26))+time.Now().Format("150405.000000000"), publishedImage{data: []byte("x"), mime: "image/png", expires: future})
+func TestPublishedImagePruneDropsExpiredFiles(t *testing.T) {
+	store := newTestStore(t)
+	stale := filepath.Join(store.dir, "old.png")
+	if err := os.WriteFile(stale, onePixelPNG, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if len(store.items) > publishedImageMaxCount {
-		t.Fatalf("store grew past its cap: %d entries", len(store.items))
+	old := time.Now().Add(-publishedImageTTL - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, ok := store.get("kept.png"); ok {
-		t.Fatal("oldest entry should have been evicted first")
+	store.put("fresh.png", publishedImage{data: onePixelPNG, mime: "image/png", expires: time.Now().Add(time.Hour)})
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("prune left an expired file: %v", err)
+	}
+	if _, _, ok := store.get("fresh.png"); !ok {
+		t.Fatal("prune removed the live file")
+	}
+}
+
+func TestPublishedImageNameValidation(t *testing.T) {
+	store := newTestStore(t)
+	secret := filepath.Join(filepath.Dir(store.dir), "secret.png")
+	if err := os.WriteFile(secret, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"../secret.png", "..%2Fsecret.png", "/etc/passwd", "", "a/b.png"} {
+		if _, _, ok := store.get(name); ok {
+			t.Fatalf("traversal name %q resolved", name)
+		}
 	}
 }
