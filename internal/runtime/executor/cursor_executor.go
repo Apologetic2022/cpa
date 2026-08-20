@@ -87,11 +87,19 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	tools := extractTools(body)
+	var sessionOpts []cursorlib.SessionOption
 	if imageChat {
-		if messages, err = rewriteImageChatMessages(messages); err != nil {
+		var refs []cursorlib.ReferenceImage
+		if refs, err = extractChatImageInputs(body); err != nil {
+			return resp, err
+		}
+		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return resp, err
 		}
 		tools = nil
+		if len(refs) > 0 {
+			sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
+		}
 	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
@@ -99,7 +107,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
-	result, err := cursorlib.RunChat(ctx, creds, upstreamModel, messages, tools)
+	result, err := cursorlib.RunChat(ctx, creds, upstreamModel, messages, tools, sessionOpts...)
 	if err != nil {
 		return resp, err
 	}
@@ -150,11 +158,19 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	tools := extractTools(body)
+	var sessionOpts []cursorlib.SessionOption
 	if imageChat {
-		if messages, err = rewriteImageChatMessages(messages); err != nil {
+		var refs []cursorlib.ReferenceImage
+		if refs, err = extractChatImageInputs(body); err != nil {
+			return nil, err
+		}
+		if messages, err = rewriteImageChatMessages(messages, refs); err != nil {
 			return nil, err
 		}
 		tools = nil
+		if len(refs) > 0 {
+			sessionOpts = append(sessionOpts, cursorlib.WithReferenceImages(refs))
+		}
 	}
 
 	creds, err := e.ensureCredentials(ctx, auth)
@@ -162,7 +178,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
-	session, err := openCursorSession(ctx, creds, upstreamModel, messages, tools)
+	session, err := openCursorSession(ctx, creds, upstreamModel, messages, tools, sessionOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -631,20 +647,62 @@ func buildCursorImagesResponse(images []cursorlib.GeneratedImage) []byte {
 }
 
 // rewriteImageChatMessages collapses a chat request against the cursor-image
-// model into a single generation instruction built from the latest user turn.
-func rewriteImageChatMessages(messages []cursorlib.ChatMessage) ([]cursorlib.ChatMessage, error) {
+// model into a single instruction built from the latest user turn. Inline
+// images on that turn make it an edit; without them it is a plain generation.
+func rewriteImageChatMessages(messages []cursorlib.ChatMessage, refs []cursorlib.ReferenceImage) ([]cursorlib.ChatMessage, error) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			return []cursorlib.ChatMessage{{
-				Role:    "user",
-				Content: cursorlib.ImageGenerationInstruction(messages[i].Content),
-			}}, nil
+			instruction := cursorlib.ImageGenerationInstruction(messages[i].Content)
+			if len(refs) > 0 {
+				instruction = cursorlib.ImageEditInstruction(messages[i].Content, refs)
+			}
+			return []cursorlib.ChatMessage{{Role: "user", Content: instruction}}, nil
 		}
+	}
+	if len(refs) > 0 {
+		return nil, fmt.Errorf("cursor: image edit requires a text prompt describing the change")
 	}
 	return nil, fmt.Errorf("cursor: image generation requires a user prompt message")
 }
 
-func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, model string, messages []cursorlib.ChatMessage, tools []cursorlib.ToolDefinition) (*cursorlib.Session, error) {
+// extractChatImageInputs collects the inline images attached to the latest user
+// turn. Only that turn is considered: earlier images belong to previous
+// generations, and feeding them back would silently blend unrelated inputs.
+func extractChatImageInputs(body []byte) ([]cursorlib.ReferenceImage, error) {
+	arr := gjson.GetBytes(body, "messages")
+	if !arr.IsArray() {
+		return nil, nil
+	}
+	items := arr.Array()
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Get("role").String() != "user" {
+			continue
+		}
+		content := items[i].Get("content")
+		if !content.IsArray() {
+			return nil, nil
+		}
+		var refs []cursorlib.ReferenceImage
+		for _, part := range content.Array() {
+			url := strings.TrimSpace(part.Get("image_url.url").String())
+			if url == "" {
+				url = strings.TrimSpace(part.Get("image_url").String())
+			}
+			if url == "" {
+				continue
+			}
+			data, mime, err := decodeImageDataURL(url)
+			if err != nil {
+				return nil, err
+			}
+			refs = append(refs, cursorlib.ReferenceImage{Data: data, MimeType: mime})
+		}
+		return finalizeReferenceImages(refs)
+	}
+	return nil, nil
+}
+
+func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, model string, messages []cursorlib.ChatMessage, tools []cursorlib.ToolDefinition, opts ...cursorlib.SessionOption) (*cursorlib.Session, error) {
 	results := trailingToolResults(messages)
 	if len(results) > 0 {
 		session, err := cursorlib.DefaultSessionManager().ResolveForToolResults(results)
@@ -656,7 +714,7 @@ func openCursorSession(ctx context.Context, creds cursorlib.AccountCredentials, 
 		}
 		return session, nil
 	}
-	return cursorlib.StartSession(ctx, creds, model, messages, tools)
+	return cursorlib.StartSession(ctx, creds, model, messages, tools, opts...)
 }
 
 func trailingToolResults(messages []cursorlib.ChatMessage) []cursorlib.ToolResult {
