@@ -24,7 +24,9 @@ type ChatMessage struct {
 
 // AccountCredentials are the fields required to open an Agent run.
 type AccountCredentials struct {
-	AccessToken   string
+	AccessToken string
+	// APIKey is a Cursor user API key (crsr_...) exchangeable for access tokens.
+	APIKey        string
 	RefreshToken  string
 	AuthClientID  string
 	BaseURL       string
@@ -57,6 +59,7 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	}
 	creds := AccountCredentials{
 		AccessToken:   get("access_token"),
+		APIKey:        get("api_key"),
 		RefreshToken:  get("refresh_token"),
 		AuthClientID:  get("auth_client_id"),
 		BaseURL:       get("base_url"),
@@ -76,7 +79,9 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	if creds.ClientVersion == "" {
 		creds.ClientVersion = cursorauth.DefaultClientVersion
 	}
-	if creds.AuthClientID == "" {
+	// API-key credentials refresh via /auth/exchange_user_api_key, which the
+	// auth service selects only when no OAuth client ID is present.
+	if creds.AuthClientID == "" && creds.APIKey == "" {
 		creds.AuthClientID = cursorauth.DefaultAuthClientID
 	}
 	if creds.MachineID == "" {

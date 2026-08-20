@@ -526,19 +526,28 @@ func (e *CursorExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *CursorExecutor) ensureCredentials(ctx context.Context, auth *cliproxyauth.Auth) (cursorlib.AccountCredentials, error) {
 	creds := cursorlib.CredentialsFromMetadata(authMetadata(auth))
-	if creds.AccessToken == "" {
+	// API-key credentials (config cursor-api-key entries) carry no OAuth
+	// refresh token; the key itself is exchanged for access tokens.
+	refreshSecret := creds.RefreshToken
+	if refreshSecret == "" {
+		refreshSecret = creds.APIKey
+	}
+	if creds.AccessToken == "" && refreshSecret == "" {
 		return creds, fmt.Errorf("cursor: auth missing access_token")
 	}
 	storage := &cursorauth.TokenStorage{
 		AccessToken:  creds.AccessToken,
-		RefreshToken: creds.RefreshToken,
+		RefreshToken: refreshSecret,
 		Expired:      stringFromMeta(authMetadata(auth), "expired"),
 	}
-	if !storage.NeedsRefresh() {
+	if creds.AccessToken != "" && !storage.NeedsRefresh() {
 		return creds, nil
 	}
-	refreshed, err := e.svc.RefreshToken(ctx, creds.RefreshToken, creds.AuthClientID, creds.BaseURL)
+	refreshed, err := e.svc.RefreshToken(ctx, refreshSecret, creds.AuthClientID, creds.BaseURL)
 	if err != nil {
+		if creds.AccessToken == "" {
+			return creds, fmt.Errorf("cursor: token exchange failed: %w", err)
+		}
 		log.Warnf("cursor token refresh failed, using existing token: %v", err)
 		return creds, nil
 	}

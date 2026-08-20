@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,10 +53,7 @@ func UnaryPOSTWithHeader(ctx context.Context, baseURL, path string, headers map[
 	httpReq.ProtoMajor = 2
 
 	transport := &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			d := &tls.Dialer{Config: cfg}
-			return d.DialContext(ctx, network, addr)
-		},
+		DialTLSContext: dialTLSViaEnvProxy,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"h2", "http/1.1"},

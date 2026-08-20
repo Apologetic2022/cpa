@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,10 +48,7 @@ func OpenAgentRun(ctx context.Context, baseURL string, headers map[string]string
 	req.ProtoMajor = 2
 
 	transport := &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			d := &tls.Dialer{Config: cfg}
-			return d.DialContext(ctx, network, addr)
-		},
+		DialTLSContext: dialTLSViaEnvProxy,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"h2", "http/1.1"},
