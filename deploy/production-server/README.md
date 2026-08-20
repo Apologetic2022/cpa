@@ -42,16 +42,20 @@ markdown 净化器（harden-react-markdown / streamdown）一律拒绝 `data:`�
   （服务用户 `cliproxy` 没有 home，且 `PrivateTmp=true` 会在重启时清空 /tmp）。
 - 生成图只保留 24 小时：网关自带清理协程，启动时先扫一遍，之后每小时扫一次，
   删掉 `/opt/cli-proxy/image-cache` 里超过一天的文件，不需要 cron 或 systemd timer。
-- 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `block`：正文里不写任何
-  图片引用，图片走协议自带的图片通道——`/v1/messages` 是 Anthropic 的
-  `{"type":"image","source":{"type":"base64",…}}` content block，OpenAI 路径是
-  message 上的 `images[]`。客户端按 block 类型渲染，不经过 markdown 清洗器，
-  所以不会再出现 `[Image blocked]`，正文里也没有 IP、域名或 `/cursor-images/`。
-  超过 512 KB 的图会先压到最长边 1280、JPEG 质量 85 再内嵌，避免几 MB 的
-  base64 被客户端逐轮回传。其余取值：`base64`（data URL 写进 markdown，部分
-  客户端的 harden-react-markdown / streamdown 会拦成 `[Image blocked]`）、
-  `link`（默认，绝对链接，会写出 `CPA_PUBLIC_BASE_URL`）、`relative`
-  （只给 `/cursor-images/xxx.png`，交给前面的反代拼域名）。
+- 生成图的交付方式由 `CPA_IMAGE_DELIVERY` 决定，本机取 `link`：图片以
+  `![](https://…/cursor-images/xxx.png)` 的形式写进正文，地址只出现在图片语法
+  里，渲染出来读者看到的是图本身。要不暴露本机，把 `CPA_PUBLIC_BASE_URL`
+  指到自有域名即可，网关这边不用改。
+  另外两个取值：`base64`（data URL 写进 markdown）、`relative`
+  （只给 `/cursor-images/xxx.png`，交给客户端按自己的 origin 拼）。
+- 想让图片彻底不带地址，目前没有可行解，两条路都试过并被客户端否掉：
+  - markdown 里塞 `data:` —— harden-react-markdown / streamdown 默认
+    `allowDataImages=false`，一律换成 `[Image blocked: …]`，跟前缀白名单无关。
+  - Anthropic assistant 的 `content_block.type=image` —— assistant content
+    union 里根本没有 image 这一项（只有 text / thinking / tool_use /
+    各类 *_tool_result），严格校验 SSE 的客户端会直接
+    `Type validation failed … No matching discriminator`，整轮对话报错中断。
+    所以 assistant 回复只能"指向"一张图，不能"携带"一张图。
 - 80 端口对 `/cursor-images/` 做 301，把换证书之前发出去的旧链接也导到受信任域名。
 - 续期由 `certbot.timer` 负责，`renewal-hooks/deploy/reload-nginx.sh` 在续期后 reload nginx。
   换成自有域名后，改 drop-in 里的地址 + 新签一张证书即可。

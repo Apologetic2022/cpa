@@ -42,8 +42,10 @@ func TestImageDeliveryModeSelection(t *testing.T) {
 		" data ":   imageDeliveryInline,
 		"path":     imageDeliveryPath,
 		"relative": imageDeliveryPath,
-		"block":    imageDeliveryBlock,
-		"native":   imageDeliveryBlock,
+		// An image content block aborts the turn in clients that validate the
+		// Anthropic union, so "block" is no longer a mode and falls back to a
+		// link rather than silently dropping the image.
+		"block": imageDeliveryLink,
 	}
 	for value, want := range cases {
 		t.Setenv(imageDeliveryEnv, value)
@@ -138,43 +140,27 @@ func TestInlineDataURLShrinksLargeImages(t *testing.T) {
 	}
 }
 
-// Block delivery keeps the reply text free of both the origin and the payload:
-// the bytes leave through the protocol's own image channel instead.
-func TestBlockDeliveryKeepsTextClean(t *testing.T) {
-	t.Setenv(imageDeliveryEnv, "block")
+// A link is the only delivery a hardened markdown renderer will display, but
+// the address must stay inside the image markup: what the reader sees is the
+// picture, not the host it came from.
+func TestLinkDeliveryHidesAddressBehindTheImage(t *testing.T) {
+	t.Setenv(imageDeliveryEnv, "link")
 	result := &cursorlib.ChatResult{
 		Text:   `成品如下：<img src="/home/cliproxy/.cursor/projects/cliproxy-cursor-workspace/assets/cat.png" alt="Generated image" />`,
 		Images: []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}},
 	}
-	urls := cursorImageURLs("https://15-204-94-214.sslip.io", result.Images)
-	payload := buildOpenAIChatCompletion("cursor-image", result, urls)
+	urls := cursorImageURLs("https://gw.example.com", result.Images)
+	content := gjson.GetBytes(buildOpenAIChatCompletion("cursor-image", result, urls), "choices.0.message.content").String()
 
-	content := gjson.GetBytes(payload, "choices.0.message.content").String()
-	for _, leak := range []string{"sslip.io", "15.204.94.214", "/cursor-images/", "data:image/", "/home/cliproxy/"} {
-		if strings.Contains(content, leak) {
-			t.Fatalf("reply text still contains %q: %q", leak, content)
-		}
+	if !strings.Contains(content, "![Generated image](https://gw.example.com"+cursorlib.PublishedImagePathPrefix) {
+		t.Fatalf("image is not rendered as a link: %q", content)
 	}
-	if !strings.Contains(content, "成品如下：") {
-		t.Fatalf("model prose was lost: %q", content)
+	if strings.Contains(content, "/home/cliproxy/") {
+		t.Fatalf("unrenderable local path survived: %q", content)
 	}
-
-	images := gjson.GetBytes(payload, "choices.0.message.images")
-	if !images.IsArray() || len(images.Array()) != 1 {
-		t.Fatalf("image did not travel in the images channel: %s", payload)
-	}
-	if url := images.Array()[0].Get("image_url.url").String(); !strings.HasPrefix(url, "data:image/") {
-		t.Fatalf("images channel carries %q, want inline bytes", url)
-	}
-}
-
-func TestBlockDeliveryDropsUnreferencedImageFromText(t *testing.T) {
-	t.Setenv(imageDeliveryEnv, "block")
-	imgs := []cursorlib.GeneratedImage{{Base64: testPNGBase64, MimeType: "image/png", FilePath: "cat.png"}}
-	urls := cursorImageURLs("https://gw.example.com", imgs)
-	got := renderGeneratedImages("图片已生成。", imgs, textImageURLs(urls))
-	if got != "图片已生成。" {
-		t.Fatalf("text was rewritten: %q", got)
+	prose := markdownImagePattern.ReplaceAllString(content, "")
+	if strings.Contains(prose, "gw.example.com") || strings.Contains(prose, cursorlib.PublishedImagePathPrefix) {
+		t.Fatalf("address shows up as visible text: %q", prose)
 	}
 }
 
