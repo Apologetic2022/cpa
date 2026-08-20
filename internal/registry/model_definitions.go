@@ -90,7 +90,7 @@ func GetCursorModels() []*ModelInfo {
 // ImageModelID is the routed model id for image generation on the
 // OpenAI-compatible /v1/images endpoints. It is the only model that produces
 // images: every other model answers with text.
-const ImageModelID = "image"
+const ImageModelID = "nano-banana-pro"
 
 // WithCursorBuiltins injects hard-coded Cursor Agent models that should not
 // disappear when upstream models.json has an empty cursor section.
@@ -112,9 +112,9 @@ func ImageBuiltinModel() *ModelInfo {
 		Created:     1740960000,
 		OwnedBy:     "cursor",
 		Type:        OpenAIImageModelType,
-		DisplayName: "Generate Image",
+		DisplayName: "Nano Banana Pro",
 		Name:        ImageModelID,
-		Description: "Image generation model.",
+		Description: "Image generation model. Upscales to 2K/4K when the prompt asks for it.",
 	}
 }
 
