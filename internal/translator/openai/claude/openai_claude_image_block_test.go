@@ -78,6 +78,29 @@ func TestStreamingImagesBecomeContentBlocks(t *testing.T) {
 	}
 }
 
+// The non-streaming /v1/messages handler goes through its own converter, so it
+// needs the same image channel as the streaming one.
+func TestNonStreamConverterCarriesImageBlock(t *testing.T) {
+	body := `{"id":"c1","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"已生成一张图。","reasoning_content":"thinking","images":[{"index":0,"type":"image_url","image_url":{"url":"` + tinyPNGDataURL + `"}}]}}]}`
+	var param any
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "grok-4.6", []byte(`{"model":"grok-4.6"}`), nil, []byte(body), &param)
+
+	content := gjson.GetBytes(out, "content")
+	types := make([]string, 0, len(content.Array()))
+	for _, block := range content.Array() {
+		types = append(types, block.Get("type").String())
+	}
+	if len(types) != 3 || types[0] != "text" || types[1] != "image" || types[2] != "thinking" {
+		t.Fatalf("unexpected content blocks %v: %s", types, out)
+	}
+	if got := content.Array()[1].Get("source.media_type").String(); got != "image/png" {
+		t.Fatalf("media_type = %q", got)
+	}
+	if text := content.Array()[0].Get("text").String(); strings.Contains(text, "data:") {
+		t.Fatalf("payload leaked into the text: %q", text)
+	}
+}
+
 func TestNonImageDataURLsAreIgnored(t *testing.T) {
 	body := `{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"hi","images":[{"image_url":{"url":"https://example.com/a.png"}},{"image_url":{"url":"data:text/plain;base64,aGk="}}]}}]}`
 	var param any

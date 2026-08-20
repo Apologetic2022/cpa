@@ -728,6 +728,12 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
+			for _, dataURL := range openAIImageDataURLs(message.Get("images")) {
+				if block, ok := anthropicImageBlock(dataURL); ok {
+					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				}
+			}
+
 			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
