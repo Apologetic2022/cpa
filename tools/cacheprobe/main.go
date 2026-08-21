@@ -9,10 +9,18 @@
 // With conversation reuse enabled (default) follow-up turns should report
 // cache_read > 0; with CPA_CURSOR_CONV_REUSE=0 they replicate the fresh-
 // conversation-per-turn behaviour and show whether the provider cache is lost.
+//
+// PROBE_NONCE seeds a per-run marker into every user message so repeated
+// probe runs do not warm each other's provider cache prefix (defaults to a
+// random value). PROBE_ROTATE_SESSION=1 rebuilds the account credentials for
+// every turn, giving each turn a fresh x-session-id the way a gateway that
+// derives credentials per request would.
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -36,17 +44,33 @@ func main() {
 	if model == "" {
 		model = "grok-4.6"
 	}
+	nonce := strings.TrimSpace(os.Getenv("PROBE_NONCE"))
+	if nonce == "" {
+		buf := make([]byte, 4)
+		_, _ = rand.Read(buf)
+		nonce = hex.EncodeToString(buf)
+	}
+	rotateSession := os.Getenv("PROBE_ROTATE_SESSION") == "1"
 	ctx := context.Background()
 
 	svc := cursorauth.NewAuthService()
 	tok, err := svc.RefreshToken(ctx, apiKey, "", "")
 	must("token exchange", err)
-	fmt.Printf("token ok (expires %s)\n", tok.ExpiresAt.Format(time.RFC3339))
+	fmt.Printf("token ok (expires %s) nonce=%s rotate_session=%v\n", tok.ExpiresAt.Format(time.RFC3339), nonce, rotateSession)
 
-	creds := cursorlib.CredentialsFromMetadata(map[string]any{
-		"access_token": tok.AccessToken,
-		"api_key":      apiKey,
-	})
+	buildCreds := func() cursorlib.AccountCredentials {
+		return cursorlib.CredentialsFromMetadata(map[string]any{
+			"access_token": tok.AccessToken,
+			"api_key":      apiKey,
+		})
+	}
+	creds := buildCreds()
+	credsForTurn := func() cursorlib.AccountCredentials {
+		if rotateSession {
+			return buildCreds()
+		}
+		return creds
+	}
 
 	system := strings.Repeat(
 		"You are an expert software engineering assistant for the ACME monorepo. "+
@@ -56,9 +80,9 @@ func main() {
 
 	msgs := []cursorlib.ChatMessage{
 		{Role: "system", Content: system},
-		{Role: "user", Content: "Reply with exactly the word: ONE"},
+		{Role: "user", Content: "Session " + nonce + ". Reply with exactly the word: ONE"},
 	}
-	r1, err := cursorlib.RunChat(ctx, creds, model, msgs, nil)
+	r1, err := cursorlib.RunChat(ctx, credsForTurn(), model, msgs, nil)
 	must("turn1", err)
 	report("turn1", r1)
 
@@ -68,7 +92,7 @@ func main() {
 		cursorlib.ChatMessage{Role: "assistant", Content: r1.Text},
 		cursorlib.ChatMessage{Role: "user", Content: "Reply with exactly the word: TWO"},
 	)
-	r2, err := cursorlib.RunChat(ctx, creds, model, msgs2, nil)
+	r2, err := cursorlib.RunChat(ctx, credsForTurn(), model, msgs2, nil)
 	must("turn2", err)
 	report("turn2", r2)
 
@@ -78,7 +102,7 @@ func main() {
 		cursorlib.ChatMessage{Role: "assistant", Content: r2.Text},
 		cursorlib.ChatMessage{Role: "user", Content: "Reply with exactly the word: THREE"},
 	)
-	r3, err := cursorlib.RunChat(ctx, creds, model, msgs3, nil)
+	r3, err := cursorlib.RunChat(ctx, credsForTurn(), model, msgs3, nil)
 	must("turn3", err)
 	report("turn3", r3)
 }
