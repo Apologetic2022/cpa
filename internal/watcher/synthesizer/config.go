@@ -187,7 +187,12 @@ func (s *ConfigSynthesizer) synthesizeCursorKeys(ctx *SynthesisContext) []*corea
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
 		base := strings.TrimSpace(ck.BaseURL)
+		// Allocate the stable ID before the disabled check so the ID sequence
+		// stays aligned with the management API regardless of disabled flags.
 		id, token := idGen.Next("cursor:apikey", key, base)
+		if ck.Disabled {
+			continue
+		}
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:cursor[%s]", token),
 			"api_key": key,

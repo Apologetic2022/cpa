@@ -259,6 +259,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(changes, fmt.Sprintf("cursor[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
+			if o.Disabled != n.Disabled {
+				changes = append(changes, fmt.Sprintf("cursor[%d].disabled: %t -> %t", i, o.Disabled, n.Disabled))
+			}
 		}
 	}
 

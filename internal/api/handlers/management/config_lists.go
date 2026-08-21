@@ -593,7 +593,26 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 
 // cursor-api-key: []CursorKey
 func (h *Handler) GetCursorKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"cursor-api-key": h.cursorKeysWithAuthIndex()})
+	c.JSON(200, gin.H{"cursor-api-key": h.cursorKeysWithRuntimeStatus()})
+}
+
+// CreateCursorKey appends a single Cursor API key entry. Convenience endpoint
+// for the management panel widget so it does not have to PUT the whole list.
+func (h *Handler) CreateCursorKey(c *gin.Context) {
+	var entry config.CursorKey
+	if err := c.ShouldBindJSON(&entry); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if strings.TrimSpace(entry.APIKey) == "" {
+		c.JSON(400, gin.H{"error": "missing api-key"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.CursorKey = append(h.cfg.CursorKey, entry)
+	h.cfg.SanitizeCursorKeys()
+	h.persistLocked(c)
 }
 func (h *Handler) PutCursorKeys(c *gin.Context) {
 	data, err := c.GetRawData()
@@ -627,6 +646,7 @@ func (h *Handler) PatchCursorKey(c *gin.Context) {
 		ProxyURL       *string   `json:"proxy-url"`
 		ExcludedModels *[]string `json:"excluded-models"`
 		DisableCooling *bool     `json:"disable-cooling"`
+		Disabled       *bool     `json:"disabled"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -686,6 +706,9 @@ func (h *Handler) PatchCursorKey(c *gin.Context) {
 	}
 	if body.Value.DisableCooling != nil {
 		entry.DisableCooling = *body.Value.DisableCooling
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
 	}
 	h.cfg.CursorKey[targetIndex] = entry
 	h.cfg.SanitizeCursorKeys()

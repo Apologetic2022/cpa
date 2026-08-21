@@ -3,9 +3,11 @@ package management
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type geminiKeyWithAuthIndex struct {
@@ -26,6 +28,22 @@ type codexKeyWithAuthIndex struct {
 type cursorKeyWithAuthIndex struct {
 	config.CursorKey
 	AuthIndex string `json:"auth-index,omitempty"`
+}
+
+// cursorKeyWithRuntimeStatus enriches a configured Cursor API key with live
+// runtime state from the auth manager so the management panel widget can show
+// per-key health without a second round-trip. Serialized shape matches the
+// original production build of the Cursor API key manager page.
+type cursorKeyWithRuntimeStatus struct {
+	cursorKeyWithAuthIndex
+	Index          int             `json:"index"`
+	Success        int64           `json:"success"`
+	Failed         int64           `json:"failed"`
+	Unavailable    bool            `json:"unavailable"`
+	StatusMessage  string          `json:"status_message,omitempty"`
+	LastError      *coreauth.Error `json:"last_error,omitempty"`
+	NextRetryAfter *time.Time      `json:"next_retry_after,omitempty"`
+	UpdatedAt      *time.Time      `json:"updated_at,omitempty"`
 }
 
 type vertexCompatKeyWithAuthIndex struct {
@@ -199,11 +217,11 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	return out
 }
 
-func (h *Handler) cursorKeysWithAuthIndex() []cursorKeyWithAuthIndex {
+func (h *Handler) cursorKeysWithRuntimeStatus() []cursorKeyWithRuntimeStatus {
 	if h == nil {
 		return nil
 	}
-	liveIndexByID := h.liveAuthIndexByID()
+	liveAuthByID := h.liveCursorAuthByID()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -212,18 +230,62 @@ func (h *Handler) cursorKeysWithAuthIndex() []cursorKeyWithAuthIndex {
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]cursorKeyWithAuthIndex, len(h.cfg.CursorKey))
+	out := make([]cursorKeyWithRuntimeStatus, len(h.cfg.CursorKey))
 	for i := range h.cfg.CursorKey {
 		entry := h.cfg.CursorKey[i]
-		authIndex := ""
+		item := cursorKeyWithRuntimeStatus{
+			cursorKeyWithAuthIndex: cursorKeyWithAuthIndex{CursorKey: entry},
+			Index:                  i,
+		}
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("cursor:apikey", key, entry.BaseURL)
-			authIndex = liveIndexByID[id]
+			if live := liveAuthByID[id]; live != nil {
+				item.AuthIndex = strings.TrimSpace(live.Index)
+				if item.AuthIndex == "" {
+					item.AuthIndex = live.EnsureIndex()
+				}
+				item.Success = live.Success
+				item.Failed = live.Failed
+				item.Unavailable = live.Unavailable
+				item.StatusMessage = strings.TrimSpace(live.StatusMessage)
+				item.LastError = live.LastError
+				if !live.NextRetryAfter.IsZero() {
+					next := live.NextRetryAfter
+					item.NextRetryAfter = &next
+				}
+				if !live.UpdatedAt.IsZero() {
+					updated := live.UpdatedAt
+					item.UpdatedAt = &updated
+				}
+			}
 		}
-		out[i] = cursorKeyWithAuthIndex{
-			CursorKey: entry,
-			AuthIndex: authIndex,
+		out[i] = item
+	}
+	return out
+}
+
+// liveCursorAuthByID snapshots the auth manager's cursor credentials keyed by
+// stable auth ID. List() returns clones, so callers may read freely.
+func (h *Handler) liveCursorAuthByID() map[string]*coreauth.Auth {
+	out := map[string]*coreauth.Auth{}
+	if h == nil {
+		return out
+	}
+	h.mu.Lock()
+	manager := h.authManager
+	h.mu.Unlock()
+	if manager == nil {
+		return out
+	}
+	for _, live := range manager.List() {
+		if live == nil || !strings.EqualFold(strings.TrimSpace(live.Provider), "cursor") {
+			continue
 		}
+		id := strings.TrimSpace(live.ID)
+		if id == "" {
+			continue
+		}
+		out[id] = live
 	}
 	return out
 }
