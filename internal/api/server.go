@@ -823,6 +823,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
 		mgmt.GET("/cursor-api-key", s.mgmt.GetCursorKeys)
+		mgmt.POST("/cursor-api-key", s.mgmt.CreateCursorKey)
 		mgmt.PUT("/cursor-api-key", s.mgmt.PutCursorKeys)
 		mgmt.PATCH("/cursor-api-key", s.mgmt.PatchCursorKey)
 		mgmt.DELETE("/cursor-api-key", s.mgmt.DeleteCursorKey)
@@ -1012,7 +1013,22 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	// The upstream panel knows nothing about the Cursor provider; patch the
+	// Cursor API key manager page in at serve time. On failure serve the
+	// pristine panel rather than breaking the whole control panel.
+	html, errInject := managementasset.AddCursorAPIKeyManagerToManagementHTML(string(data))
+	if errInject != nil {
+		log.WithError(errInject).Warn("failed to inject Cursor API key manager into management control panel")
+	}
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
