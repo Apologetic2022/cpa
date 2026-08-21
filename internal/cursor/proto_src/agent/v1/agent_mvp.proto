@@ -28,7 +28,9 @@ message ConversationAction {
 
 message ConversationStateStructure {
   repeated bytes root_prompt_messages_json = 1;
-  repeated bytes turns = 2;
+  // Field number matches the audited desktop schema (turns = 8); server
+  // checkpoints would land in unknown fields under any other number.
+  repeated bytes turns = 8;
 }
 
 message ModelDetails {
