@@ -23,6 +23,23 @@
 > 否则会被 `include sites-enabled/*` 加载并报 duplicate default server；本机备份放在
 > `/etc/nginx/site-backups/`。
 
+## 管理面板的 Cursor API Key 页面
+
+管理面板（`/management.html`）是上游 Management Center 的预编译单页，本身不认识 Cursor
+供应商。侧边栏的「Cursor API Key」页面（列表/新增/编辑/停用/删除 + 每个 Key 的调用
+成功/失败计数和最近错误）是网关在**服务时**注入的：`internal/managementasset/cursor_api_key.go`
+往 HTML 里打进导航项、SPA 路由、多语言标签和一段自包含的小组件脚本。磁盘上的
+`static/management.html` 永远是上游原版（面板每 3 小时自动更新也不受影响）；上游改了
+打包结构导致锚点匹配不上时，网关会降级为原版面板并在日志里 warn。
+
+后端是 `/v0/management/cursor-api-key` 的 GET（带 index/auth-index/success/failed/
+unavailable/last_error 运行状态）+ POST（追加单个 Key）+ PUT/PATCH/DELETE；`disabled: true`
+的 Key 会持久化进 config.yaml 并从路由注册里剔除。
+
+> 历史教训：这套 UI 曾只存在于线上编译产物、没进 git，2026-08-21 部署缓存修复时被
+> 覆盖丢失，后来从备份二进制 `cli-proxy-api.bak-pre-convfix-20260821-103218` 里原样
+> 找回。现在代码在仓库里，重新编译部署不会再丢。
+
 ## 谁能出图
 
 出图只有两条入口：模型 `nano-banana-pro`（`/v1/chat/completions`、`/v1/messages` 都
