@@ -154,6 +154,10 @@ type Session struct {
 	resumeKey       string
 	everOutput      bool
 	snapshotStored  bool
+	// pendingResolve releases the conversation-cache pending marker announced
+	// at turn_ended. A follow-up request racing the trailing checkpoint waits
+	// on that marker instead of missing the cache.
+	pendingResolve func()
 }
 
 // ChatResult is the collected text response from one Agent segment / run.
@@ -524,6 +528,20 @@ func (s *Session) flushAssistantSegmentLocked() {
 	s.segCalls = nil
 }
 
+// finalTranscriptLocked renders the transcript exactly as flushing would leave
+// it, without consuming the live segment buffers. It exists so the transcript
+// fingerprint can be computed at turn_ended, before the trailing checkpoint
+// has been stored.
+func (s *Session) finalTranscriptLocked() []ChatMessage {
+	out := append([]ChatMessage(nil), s.transcript...)
+	text := s.segText.String()
+	calls := s.segCalls
+	if strings.TrimSpace(text) != "" || len(calls) > 0 {
+		out = append(out, ChatMessage{Role: "assistant", Content: text, ToolCalls: calls})
+	}
+	return out
+}
+
 func (s *Session) flushAssistantSegment() {
 	s.mu.Lock()
 	s.flushAssistantSegmentLocked()
@@ -590,7 +608,20 @@ func (s *Session) storeConversationSnapshot() {
 		blobs:          blobs,
 		model:          model,
 	})
+	s.resolvePending()
 	log.Debugf("cursor: stored conversation checkpoint conv=%s account=%s turns=%d", convID, accountKey, len(state.GetTurns()))
+}
+
+// resolvePending releases the pending-store marker, waking lookups that were
+// waiting for this turn's checkpoint. Safe to call at any point after
+// turn_ended, including when the store was abandoned.
+func (s *Session) resolvePending() {
+	s.mu.Lock()
+	resolve := s.pendingResolve
+	s.mu.Unlock()
+	if resolve != nil {
+		resolve()
+	}
 }
 
 func (s *Session) fail(err error) {
@@ -818,7 +849,13 @@ func (s *Session) closeWith(reason string) error {
 	pending := len(s.pending)
 	stream := s.stream
 	cancel := s.cancel
+	resolve := s.pendingResolve
 	s.mu.Unlock()
+	// A session that ends without storing its snapshot must still release the
+	// pending marker, or a racing lookup would block for the full wait.
+	if resolve != nil {
+		resolve()
+	}
 	log.Debugf("cursor session close: id=%s reason=%s pending_tools=%d", s.ID, reason, pending)
 	if cancel != nil {
 		cancel()
@@ -878,6 +915,14 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			}
 			s.mu.Lock()
 			s.turnEnded = true
+			// Announce the upcoming checkpoint store before the reply is
+			// released to the client: a follow-up request that echoes this
+			// transcript can arrive faster than the trailing checkpoint, and
+			// the pending marker makes its lookup wait instead of miss.
+			if !s.allowImages && conversationReuseEnabled() && s.accountKey != "" && !s.snapshotStored && s.pendingResolve == nil {
+				fingerprint := conversationFingerprint(s.finalTranscriptLocked())
+				s.pendingResolve = defaultConversationCache.BeginPending(s.accountKey, fingerprint)
+			}
 			s.mu.Unlock()
 			s.emit(ev)
 			s.markFinished()

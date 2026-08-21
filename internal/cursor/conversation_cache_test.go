@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"testing"
+	"time"
 
 	agentv1 "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/agent/v1"
 )
@@ -53,6 +54,72 @@ func TestConversationCacheRoundTrip(t *testing.T) {
 	cache.Invalidate("acct", "fp")
 	if _, ok = cache.Lookup("acct", "fp"); ok {
 		t.Fatalf("expected entry to be invalidated")
+	}
+}
+
+func TestLookupWaitsForPendingStore(t *testing.T) {
+	cache := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]chan struct{}{}}
+	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
+
+	resolve := cache.BeginPending("acct", "fp")
+	done := make(chan struct{})
+	go func() {
+		// The store trails the lookup, as when the follow-up request beats
+		// the upstream checkpoint frame.
+		time.Sleep(50 * time.Millisecond)
+		cache.Store("acct", "fp", &convEntry{conversationID: "conv-race", state: state, model: "grok-4.6"})
+		resolve()
+		close(done)
+	}()
+
+	entry, ok := cache.Lookup("acct", "fp")
+	if !ok || entry.conversationID != "conv-race" {
+		t.Fatalf("lookup should wait out the pending store, got ok=%v entry=%+v", ok, entry)
+	}
+	<-done
+
+	// An abandoned store must release waiters promptly and report a miss.
+	resolve = cache.BeginPending("acct", "fp2")
+	start := time.Now()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		resolve()
+	}()
+	if _, ok = cache.Lookup("acct", "fp2"); ok {
+		t.Fatalf("abandoned pending store must miss")
+	}
+	if waited := time.Since(start); waited >= convPendingWait {
+		t.Fatalf("resolved pending marker should not block the full wait window (waited %s)", waited)
+	}
+
+	// No pending marker: a plain miss returns immediately.
+	start = time.Now()
+	if _, ok = cache.Lookup("acct", "fp3"); ok {
+		t.Fatalf("unexpected hit")
+	}
+	if waited := time.Since(start); waited > 500*time.Millisecond {
+		t.Fatalf("plain miss must not wait (waited %s)", waited)
+	}
+}
+
+func TestFinalTranscriptMatchesFlushedFingerprint(t *testing.T) {
+	session := &Session{
+		transcript: []ChatMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	session.segText.WriteString("partial reply")
+	session.segCalls = []ToolCall{{ID: "call-1", Name: "ls", Arguments: map[string]any{"path": "/"}}}
+
+	early := conversationFingerprint(session.finalTranscriptLocked())
+	session.flushAssistantSegmentLocked()
+	flushed := conversationFingerprint(session.transcript)
+	if early != flushed {
+		t.Fatalf("turn_ended fingerprint must match the flushed transcript fingerprint")
+	}
+	if session.segText.Len() != 0 || session.segCalls != nil {
+		t.Fatalf("flush must consume the segment buffers")
 	}
 }
 

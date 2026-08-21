@@ -28,8 +28,19 @@ import (
 // message.
 
 const (
-	convCacheTTL     = 30 * time.Minute
+	// convCacheTTL must outlive a human pausing mid-conversation: a checkpoint
+	// that expires while the user is reading forces the next turn to replay
+	// the whole history under a fresh upstream conversation, which re-bills
+	// the entire prefix.
+	convCacheTTL     = 2 * time.Hour
 	convCacheMaxSize = 512
+
+	// convPendingWait bounds how long a lookup waits for a checkpoint that is
+	// still in flight. The server's final checkpoint trails turn_ended by up
+	// to checkpointGraceWindow; an agent chaining requests can come back
+	// faster than that, and missing the entry would replay the conversation
+	// from scratch.
+	convPendingWait = checkpointGraceWindow + time.Second
 )
 
 type convEntry struct {
@@ -43,9 +54,16 @@ type convEntry struct {
 type conversationCache struct {
 	mu      sync.Mutex
 	entries map[string]*convEntry
+	// pending marks fingerprints whose checkpoint is still trailing in from
+	// the upstream stream. Lookup blocks briefly on these instead of treating
+	// the gap as a miss.
+	pending map[string]chan struct{}
 }
 
-var defaultConversationCache = &conversationCache{entries: map[string]*convEntry{}}
+var defaultConversationCache = &conversationCache{
+	entries: map[string]*convEntry{},
+	pending: map[string]chan struct{}{},
+}
 
 // conversationReuseEnabled gates checkpoint continuation. On by default;
 // CPA_CURSOR_CONV_REUSE=0 turns it off (kept for cache A/B testing on the
@@ -67,20 +85,69 @@ func (c *conversationCache) Lookup(accountKey, fingerprint string) (*convEntry, 
 		return nil, false
 	}
 	key := convCacheKey(accountKey, fingerprint)
+	entry, ok, wait := c.lookupOnce(key)
+	if ok || wait == nil {
+		return entry, ok
+	}
+	// The turn that produced this transcript has ended but its checkpoint is
+	// still in flight; wait for the store instead of replaying the whole
+	// conversation under a fresh upstream conversation id.
+	select {
+	case <-wait:
+	case <-time.After(convPendingWait):
+	}
+	entry, ok, _ = c.lookupOnce(key)
+	return entry, ok
+}
+
+// lookupOnce returns the live entry for key, or the pending-store channel a
+// caller may wait on when the entry is not there yet.
+func (c *conversationCache) lookupOnce(key string) (*convEntry, bool, chan struct{}) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
-	if !ok {
-		return nil, false
+	if ok {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, key)
+			return nil, false, nil
+		}
+		// Refresh on hit: an active conversation keeps extending its own life.
+		entry.expiresAt = now.Add(convCacheTTL)
+		return entry, true, nil
 	}
-	if now.After(entry.expiresAt) {
-		delete(c.entries, key)
-		return nil, false
+	return nil, false, c.pending[key]
+}
+
+// BeginPending announces that the checkpoint for (accountKey, fingerprint) is
+// about to be stored, so a concurrent lookup for the same transcript waits
+// for it instead of missing. The returned resolve func must be called exactly
+// when the store happened or was abandoned; it is safe to call more than once.
+func (c *conversationCache) BeginPending(accountKey, fingerprint string) func() {
+	if accountKey == "" || fingerprint == "" {
+		return func() {}
 	}
-	// Refresh on hit: an active conversation keeps extending its own life.
-	entry.expiresAt = now.Add(convCacheTTL)
-	return entry, true
+	key := convCacheKey(accountKey, fingerprint)
+	ch := make(chan struct{})
+	c.mu.Lock()
+	// A stale marker for the same key (e.g. a retried turn) is released so
+	// its waiters re-check instead of hanging on an orphaned channel.
+	if prev, ok := c.pending[key]; ok {
+		close(prev)
+	}
+	c.pending[key] = ch
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if c.pending[key] == ch {
+				delete(c.pending, key)
+			}
+			c.mu.Unlock()
+			close(ch)
+		})
+	}
 }
 
 func (c *conversationCache) Store(accountKey, fingerprint string, entry *convEntry) {
