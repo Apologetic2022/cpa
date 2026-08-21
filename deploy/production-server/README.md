@@ -28,9 +28,13 @@
 管理面板（`/management.html`）是上游 Management Center 的预编译单页，本身不认识 Cursor
 供应商。侧边栏的「Cursor API Key」页面（列表/新增/编辑/停用/删除 + 每个 Key 的调用
 成功/失败计数和最近错误）是网关在**服务时**注入的：`internal/managementasset/cursor_api_key.go`
-往 HTML 里打进导航项、SPA 路由、多语言标签和一段自包含的小组件脚本。磁盘上的
+往 HTML 里打进导航项、SPA 路由、多语言标签和一段自包含的小组件脚本。服务器磁盘上的
 `static/management.html` 永远是上游原版（面板每 3 小时自动更新也不受影响）；上游改了
 打包结构导致锚点匹配不上时，网关会降级为原版面板并在日志里 warn。
+
+> 该文件（约 2.5MB，2026-08-20 抓取的上游预编译单页，无固定版本号）不再入库：
+> 它是纯上游产物且线上每 3 小时自动更新，快照里的副本没有信息量。恢复部署时
+> 由面板的自动更新机制重新拉取即可。
 
 后端是 `/v0/management/cursor-api-key` 的 GET（带 index/auth-index/success/failed/
 unavailable/last_error 运行状态）+ POST（追加单个 Key）+ PUT/PATCH/DELETE；`disabled: true`
@@ -143,15 +147,13 @@ realesrgan / waifu2x / ffmpeg / ImageMagick，所以不是神经网络超分，�
 ```
 opt/cli-proxy/                    # 服务器 /opt/cli-proxy（运行时主目录）
   config.yaml                     # 网关生效配置（已脱敏）
-  adapter/                        # Claude Code 适配器（adapter.mjs / sdk-diag.mjs / package*.json）
+  adapter/                        # Claude Code 适配器（adapter.mjs / package*.json）
   agents/claude-account.env       # 账号 agent 环境变量（已脱敏）
   bin/                            # 项目自带脚本（Python 回环代理、egress-guard.sh）
   etc/cursor-proxy.env            # Cursor 出口代理环境变量（已脱敏）
-  static/management.html          # 管理面板单页 UI
 etc/systemd/system/               # 服务器上的 systemd 单元及 drop-in
 etc/nginx/sites-available/        # nginx 反代站点配置（线上生效的是 sites-enabled 下的同名普通文件）
 etc/letsencrypt/renewal-hooks/    # 证书续期后的 nginx reload 钩子
-home/ubuntu/modeb-deploy/         # 原始部署包（setup.sh / egress-guard.sh / 配置模板 / systemd 模板）
 home/ubuntu/cachetest/            # 缓存命中对比测试脚本（run_cachetest_gw.sh，已脱敏）
 ```
 
@@ -173,4 +175,8 @@ home/ubuntu/cachetest/            # 缓存命中对比测试脚本（run_cachete
 - `/opt/cli-proxy/auths/` OAuth 凭证文件、`cert.pem` / `key.pem`（私钥凭证，不入库）
 - `/opt/cli-proxy/logs/`（约 261MB 运行日志）、`/opt/cli-proxy/rqlite/`（数据库状态）
 - `adapter/node_modules/`（约 563MB，可由 `package-lock.json` 重装）
+- `/opt/cli-proxy/static/management.html`（约 2.5MB 上游预编译面板，见上文说明）
+- `/opt/cli-proxy/adapter/sdk-diag.mjs`（一次性 SDK 连通性诊断脚本，非运行时依赖）
+- `~/modeb-deploy/` 原始部署包（早期部署脚本与配置/systemd 模板，内容已被
+  `opt/`、`etc/` 下的生效副本取代，线上以生效副本为准）
 - 历史 `config.yaml.bak-*` 备份、`~/staging` 与 `~/cachetest` 下的测试二进制
