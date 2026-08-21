@@ -622,9 +622,6 @@ func (s *Session) fail(err error) {
 	_ = s.closeWith("stream_error")
 }
 
-// Events returns the live event stream for the current segment consumer.
-func (s *Session) Events() <-chan StreamEvent { return s.events }
-
 // CollectSegment drains events until segment_end.
 func (s *Session) CollectSegment(ctx context.Context) (*ChatResult, error) {
 	result := &ChatResult{

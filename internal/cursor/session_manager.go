@@ -80,21 +80,6 @@ func (m *SessionManager) UnbindPending(toolCallID string) {
 	delete(m.pending, key)
 }
 
-// LookupPending returns the session waiting for the given tool call.
-func (m *SessionManager) LookupPending(toolCallID string) *Session {
-	key := NormalizeToolCallID(toolCallID)
-	if m == nil || key == "" {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	session := m.pending[key]
-	if session != nil {
-		session.touch()
-	}
-	return session
-}
-
 // ErrToolSessionLost reports that the Agent run a tool result belongs to is no
 // longer available: it expired, the gateway restarted, or the run was torn
 // down. Callers replay the conversation instead of failing the request.

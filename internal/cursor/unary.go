@@ -18,13 +18,8 @@ import (
 
 const availableModelsPath = "/aiserver.v1.AiService/AvailableModels"
 
-// UnaryPOST performs a Cursor Connect unary RPC with raw application/proto body.
-func UnaryPOST(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) error {
-	_, err := UnaryPOSTWithHeader(ctx, baseURL, path, headers, req, resp)
-	return err
-}
-
-// UnaryPOSTWithHeader is UnaryPOST and also returns response headers (Set-Cookie).
+// UnaryPOSTWithHeader performs a Cursor Connect unary RPC with raw
+// application/proto body and returns the response headers (Set-Cookie).
 func UnaryPOSTWithHeader(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) (http.Header, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {

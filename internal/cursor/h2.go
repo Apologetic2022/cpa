@@ -17,7 +17,6 @@ import (
 type BidiStream struct {
 	writer *io.PipeWriter
 	body   io.ReadCloser
-	status int
 	hdr    http.Header
 	closed bool
 	mu     sync.Mutex
@@ -90,14 +89,10 @@ func OpenAgentRun(ctx context.Context, baseURL string, headers map[string]string
 		return &BidiStream{
 			writer: pw,
 			body:   r.resp.Body,
-			status: r.resp.StatusCode,
 			hdr:    r.resp.Header.Clone(),
 		}, nil
 	}
 }
-
-// Status returns the HTTP status code.
-func (s *BidiStream) Status() int { return s.status }
 
 // ResponseHeader returns the response headers from the Agent Run open.
 func (s *BidiStream) ResponseHeader() http.Header {
