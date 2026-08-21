@@ -407,7 +407,33 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if !emitLine([]byte("data: " + string(endChunk))) {
 			return
 		}
-		_ = usageFinal
+		// Surface upstream usage — including provider cache hits — to the
+		// client. The Claude translator maps prompt_tokens_details.cached_tokens
+		// to cache_read_input_tokens, which is how callers can see whether the
+		// prompt cache is working.
+		if usageFinal.Type == "usage_final" {
+			usagePayload := map[string]any{
+				"prompt_tokens":     usageFinal.InputTokens,
+				"completion_tokens": usageFinal.OutputTokens,
+				"total_tokens":      usageFinal.InputTokens + usageFinal.OutputTokens,
+			}
+			if usageFinal.CacheReadTokens > 0 {
+				usagePayload["prompt_tokens_details"] = map[string]any{
+					"cached_tokens": usageFinal.CacheReadTokens,
+				}
+			}
+			usageChunk, _ := json.Marshal(map[string]any{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   req.Model,
+				"choices": []map[string]any{},
+				"usage":   usagePayload,
+			})
+			if !emitLine([]byte("data: " + string(usageChunk))) {
+				return
+			}
+		}
 		doneChunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
 			select {
@@ -1468,15 +1494,28 @@ func buildOpenAIChatCompletion(model string, result *cursorlib.ChatResult, image
 				"finish_reason": finish,
 			},
 		},
-		"usage": map[string]any{
-			"prompt_tokens":     result.InputTokens,
-			"completion_tokens": result.OutputTokens,
-			"total_tokens":      result.InputTokens + result.OutputTokens,
-		},
+		"usage": usagePayloadFromResult(result),
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return []byte(`{"error":"marshal failed"}`)
 	}
 	return b
+}
+
+// usagePayloadFromResult renders OpenAI-shaped usage from a Cursor run,
+// carrying provider cache hits in prompt_tokens_details.cached_tokens so both
+// OpenAI and Claude clients can observe prompt-cache effectiveness.
+func usagePayloadFromResult(result *cursorlib.ChatResult) map[string]any {
+	usage := map[string]any{
+		"prompt_tokens":     result.InputTokens,
+		"completion_tokens": result.OutputTokens,
+		"total_tokens":      result.InputTokens + result.OutputTokens,
+	}
+	if result.CacheReadTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{
+			"cached_tokens": result.CacheReadTokens,
+		}
+	}
+	return usage
 }
