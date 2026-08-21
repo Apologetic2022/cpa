@@ -119,9 +119,99 @@ func storeBlob(store map[string][]byte, data []byte) []byte {
 	return id
 }
 
+// splitActiveUser separates the trailing user message that drives the next
+// turn from the history preceding it. The history slice is exactly what a
+// client echoes back before its *next* user message, which makes it the
+// conversation-cache lookup key.
+func splitActiveUser(messages []ChatMessage) ([]ChatMessage, *ChatMessage, error) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			return messages[:i], &messages[i], nil
+		}
+	}
+	return nil, nil, fmt.Errorf("cursor: request has no user message")
+}
+
+// resolveRunModelDetails applies catalog overrides to a model selection and
+// renders the ModelDetails proto the Agent run needs.
+func resolveRunModelDetails(selection *ModelSelection) *agentv1.ModelDetails {
+	publicID := selection.PublicID
+	if publicID == "" {
+		publicID = selection.ModelID
+	}
+	wireID := selection.ModelID
+	displayID := publicID
+	displayName := publicID
+	if entry, ok := catalogEntry(publicID); ok {
+		if entry.DisplayModel != "" {
+			displayID = entry.DisplayModel
+		}
+		if entry.DisplayName != "" {
+			displayName = entry.DisplayName
+		}
+		selection.MaxMode = selection.MaxMode || entry.MaxMode
+		if !selection.VariantStringRepr && len(selection.Parameters) == 0 && len(entry.Parameters) > 0 {
+			selection.Parameters = append([]ModelParameter(nil), entry.Parameters...)
+		}
+		if selection.VariantStringRepr && strings.TrimSpace(entry.WireID) != "" {
+			wireID = entry.WireID
+			selection.ModelID = wireID
+		}
+	}
+	details := &agentv1.ModelDetails{ModelId: wireID, DisplayModelId: displayID, DisplayName: displayName}
+	if selection.MaxMode {
+		maxMode := true
+		details.MaxMode = &maxMode
+	}
+	return details
+}
+
+// buildResumeRunRequest continues a previously checkpointed conversation: the
+// server restores the turns it emitted through conversation_checkpoint_update
+// and only the new user message is appended. Keeping the conversation_id is
+// what preserves Cursor's provider-side prompt cache across gateway turns.
+func buildResumeRunRequest(model string, entry *convEntry, userText string, tools []ToolDefinition) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
+	if entry == nil || entry.state == nil || strings.TrimSpace(entry.conversationID) == "" {
+		return nil, nil, "", fmt.Errorf("cursor: no conversation checkpoint to resume")
+	}
+	selection := ResolveRequestedModel(model)
+	details := resolveRunModelDetails(&selection)
+	// The original run's blobs stay resolvable: the server may still KV-fetch
+	// root prompt messages referenced by the checkpointed turns.
+	blobStore := make(map[string][]byte, len(entry.blobs))
+	for k, v := range entry.blobs {
+		blobStore[k] = v
+	}
+	conversationID := entry.conversationID
+	supportsImages := true
+	run := &agentv1.AgentRunRequest{
+		ConversationId:             &conversationID,
+		ConversationState:          entry.state,
+		ModelDetails:               details,
+		RequestedModel:             toRequestedModelProto(selection),
+		ClientSupportsInlineImages: &supportsImages,
+		Action: &agentv1.ConversationAction{
+			Action: &agentv1.ConversationAction_UserMessageAction{
+				UserMessageAction: &agentv1.UserMessageAction{
+					UserMessage: &agentv1.UserMessage{
+						Text:      userText,
+						MessageId: uuid.NewString(),
+					},
+				},
+			},
+		},
+	}
+	if defs := buildMcpToolDefinitions(tools); len(defs) > 0 {
+		run.McpTools = &agentv1.McpTools{McpTools: defs}
+	}
+	client := &agentv1.AgentClientMessage{
+		Message: &agentv1.AgentClientMessage_RunRequest{RunRequest: run},
+	}
+	return client, blobStore, conversationID, nil
+}
+
 func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
-	model = selection.ModelID
 	blobStore := map[string][]byte{}
 	systemPrompt := "You are a helpful assistant."
 	if !allowImages {
@@ -137,23 +227,15 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 		"content": systemPrompt,
 	}))
 
-	var activeUser *ChatMessage
-	historyEnd := len(messages)
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			activeUser = &messages[i]
-			historyEnd = i
-			break
-		}
-	}
-	if activeUser == nil {
-		return nil, nil, "", fmt.Errorf("cursor: request has no user message")
+	history, activeUser, err := splitActiveUser(messages)
+	if err != nil {
+		return nil, nil, "", err
 	}
 
 	// Track tool names so tool-result parts can include toolName (cursor2api).
 	toolNames := map[string]string{}
 	rootIDs := [][]byte{systemBlob}
-	for _, msg := range messages[:historyEnd] {
+	for _, msg := range history {
 		switch msg.Role {
 		case "user":
 			if strings.TrimSpace(msg.Content) == "" {
@@ -236,34 +318,7 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 	// forcing it true is rejected for many accounts ("Workspace context
 	// exclusion is not allowed…").
 	supportsImages := true
-	publicID := selection.PublicID
-	if publicID == "" {
-		publicID = model
-	}
-	wireID := selection.ModelID
-	displayID := publicID
-	displayName := publicID
-	if entry, ok := catalogEntry(publicID); ok {
-		if entry.DisplayModel != "" {
-			displayID = entry.DisplayModel
-		}
-		if entry.DisplayName != "" {
-			displayName = entry.DisplayName
-		}
-		selection.MaxMode = selection.MaxMode || entry.MaxMode
-		if !selection.VariantStringRepr && len(selection.Parameters) == 0 && len(entry.Parameters) > 0 {
-			selection.Parameters = append([]ModelParameter(nil), entry.Parameters...)
-		}
-		if selection.VariantStringRepr && strings.TrimSpace(entry.WireID) != "" {
-			wireID = entry.WireID
-			selection.ModelID = wireID
-		}
-	}
-	details := &agentv1.ModelDetails{ModelId: wireID, DisplayModelId: displayID, DisplayName: displayName}
-	if selection.MaxMode {
-		maxMode := true
-		details.MaxMode = &maxMode
-	}
+	details := resolveRunModelDetails(&selection)
 	run := &agentv1.AgentRunRequest{
 		ConversationId:             &conversationID,
 		ConversationState:          &agentv1.ConversationStateStructure{RootPromptMessagesJson: rootIDs},
