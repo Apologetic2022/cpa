@@ -18,7 +18,8 @@ import (
 )
 
 var (
-	dataTag = []byte("data:")
+	dataTag    = []byte("data:")
+	doneMarker = []byte("[DONE]")
 )
 
 // ConvertOpenAIResponseToAnthropicParams holds parameters for response conversion
@@ -103,17 +104,21 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 	}
 
-	if !bytes.HasPrefix(rawJSON, dataTag) {
+	// Executors terminate a stream with either "data: [DONE]" or a bare
+	// "[DONE]". Dropping the bare form leaves the Anthropic stream without
+	// message_delta/message_stop, which clients read as a dropped connection.
+	if bytes.HasPrefix(rawJSON, dataTag) {
+		rawJSON = bytes.TrimSpace(rawJSON[len(dataTag):])
+	} else if rawJSON = bytes.TrimSpace(rawJSON); !bytes.Equal(rawJSON, doneMarker) {
 		return [][]byte{}
 	}
-	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
 	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
 		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	}
 
 	// Check if this is the [DONE] marker
-	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
+	if bytes.Equal(bytes.TrimSpace(rawJSON), doneMarker) {
 		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
 

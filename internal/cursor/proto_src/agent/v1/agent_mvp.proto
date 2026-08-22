@@ -28,7 +28,9 @@ message ConversationAction {
 
 message ConversationStateStructure {
   repeated bytes root_prompt_messages_json = 1;
-  repeated bytes turns = 2;
+  // Field number matches the audited desktop schema (turns = 8); server
+  // checkpoints would land in unknown fields under any other number.
+  repeated bytes turns = 8;
 }
 
 message ModelDetails {
@@ -152,9 +154,41 @@ message McpToolCall {
   McpArgs args = 1;
 }
 
+// GenerateImage tool surface. Cursor's server performs the actual image
+// generation; the client only approves the request and receives the result.
+message GenerateImageArgs {
+  string description = 1;
+  optional string file_path = 2;
+  repeated string reference_image_paths = 5;
+}
+
+message GenerateImageSuccess {
+  // File path where the desktop client would save the image.
+  string file_path = 1;
+  // Base64-encoded image data.
+  string image_data = 2;
+}
+
+message GenerateImageError {
+  string error = 1;
+}
+
+message GenerateImageResult {
+  oneof result {
+    GenerateImageSuccess success = 1;
+    GenerateImageError error = 2;
+  }
+}
+
+message GenerateImageToolCall {
+  GenerateImageArgs args = 1;
+  GenerateImageResult result = 2;
+}
+
 message ToolCall {
   oneof tool {
     McpToolCall mcp_tool_call = 15;
+    GenerateImageToolCall generate_image_tool_call = 28;
   }
   string tool_call_id = 57;
 }
@@ -191,6 +225,41 @@ message InteractionUpdate {
 
 message ClientHeartbeat {}
 
+// Server->client approval request for image generation.
+message GenerateImageRequestQuery {
+  GenerateImageArgs args = 1;
+  string tool_call_id = 2;
+}
+
+message GenerateImageRequestResponse {
+  message Approved {
+    string description = 1;
+  }
+  message Rejected {
+    string reason = 1;
+  }
+  oneof result {
+    Approved approved = 1;
+    Rejected rejected = 2;
+  }
+}
+
+// Bidirectional interaction queries. Only the generate-image branch is
+// decoded by this headless client; other variants stay as unknown fields.
+message InteractionQuery {
+  uint32 id = 1;
+  oneof query {
+    GenerateImageRequestQuery generate_image_request_query = 12;
+  }
+}
+
+message InteractionResponse {
+  uint32 id = 1;
+  oneof result {
+    GenerateImageRequestResponse generate_image_request_response = 12;
+  }
+}
+
 message GetBlobArgs {
   bytes blob_id = 1;
 }
@@ -224,7 +293,24 @@ message KvClientMessage {
 
 message RequestContextArgs {}
 
+// Environment details for system prompt/context. Field numbers match the full
+// Cursor agent.proto RequestContextEnv so the server accepts them. A headless
+// client must provide at least one workspace path plus a project/artifacts
+// folder, otherwise server-side tools like GenerateImage refuse to run because
+// they have nowhere to save their output.
+message RequestContextEnv {
+  string os_version = 1;
+  repeated string workspace_paths = 2;
+  string shell = 3;
+  string terminals_folder = 7;
+  string time_zone = 10;
+  string project_folder = 11;
+  string agent_transcripts_folder = 12;
+  optional string artifacts_folder = 13;
+}
+
 message RequestContext {
+  RequestContextEnv env = 4;
   repeated McpToolDefinition tools = 7;
   optional bool web_search_enabled = 17;
   optional bool web_fetch_enabled = 24;
@@ -241,6 +327,81 @@ message RequestContext {
   optional bool git_status_info_complete = 45;
 }
 
+// Write exec surface. Cursor's server delivers GenerateImage output by asking
+// the client to write the rendered bytes to disk (write_args carries the PNG
+// in file_bytes). Field numbers match the full agent.proto WriteArgs/WriteResult.
+message WriteArgs {
+  string path = 1;
+  string file_text = 2;
+  string tool_call_id = 3;
+  bool return_file_content_after_write = 4;
+  // Raw binary data to write. When set, file_text is ignored.
+  bytes file_bytes = 5;
+  optional string encoding_hint = 6;
+}
+
+message WriteSuccess {
+  string path = 1;
+  int32 lines_created = 2;
+  int32 file_size = 3;
+  optional string file_content_after_write = 4;
+}
+
+message WriteError {
+  string path = 1;
+  string error = 2;
+}
+
+message WriteResult {
+  oneof result {
+    WriteSuccess success = 1;
+    WriteError error = 5;
+  }
+}
+
+// Read exec surface. Cursor's server pulls client-side files through this exec
+// when a tool needs their bytes; GenerateImage uses it to fetch every path
+// listed in reference_image_paths. The headless client has no real workspace on
+// disk, so reads are answered from the reference images held in memory for the
+// run. Field numbers match the full agent.proto ReadArgs/ReadResult.
+message ReadArgs {
+  string path = 1;
+  string tool_call_id = 2;
+  optional int32 offset = 4;
+  optional uint32 limit = 5;
+  optional string encoding_hint = 6;
+}
+
+message ReadSuccess {
+  string path = 1;
+  int32 total_lines = 3;
+  int64 file_size = 4;
+  bool truncated = 6;
+  // Binary reads use data; content stays for text files.
+  oneof output {
+    string content = 2;
+    bytes data = 5;
+  }
+  bool range_applied = 8;
+}
+
+message ReadError {
+  string path = 1;
+  string error = 2;
+}
+
+message ReadFileNotFound {
+  string path = 1;
+}
+
+message ReadResult {
+  oneof result {
+    ReadSuccess success = 1;
+    ReadError error = 2;
+    ReadFileNotFound file_not_found = 4;
+  }
+}
+
 message RequestContextSuccess {
   RequestContext request_context = 1;
 }
@@ -255,6 +416,8 @@ message ExecServerMessage {
   uint32 id = 1;
   string exec_id = 15;
   oneof message {
+    WriteArgs write_args = 3;
+    ReadArgs read_args = 7;
     RequestContextArgs request_context_args = 10;
     McpArgs mcp_args = 11;
   }
@@ -264,6 +427,8 @@ message ExecClientMessage {
   uint32 id = 1;
   string exec_id = 15;
   oneof message {
+    WriteResult write_result = 3;
+    ReadResult read_result = 7;
     RequestContextResult request_context_result = 10;
     McpResult mcp_result = 11;
   }
@@ -292,6 +457,7 @@ message AgentClientMessage {
     ExecClientMessage exec_client_message = 2;
     KvClientMessage kv_client_message = 3;
     ExecClientControlMessage exec_client_control_message = 5;
+    InteractionResponse interaction_response = 6;
     ClientHeartbeat client_heartbeat = 7;
   }
 }
@@ -309,6 +475,7 @@ message AgentServerMessage {
     ExecServerMessage exec_server_message = 2;
     ConversationStateStructure conversation_checkpoint_update = 3;
     KvServerMessage kv_server_message = 4;
+    InteractionQuery interaction_query = 7;
     AgentServerMetrics server_metrics = 8;
   }
 }

@@ -22,6 +22,41 @@ func TestExtractToolResultsTrailingOnly(t *testing.T) {
 	}
 }
 
+// Cursor's server sometimes runs GenerateImage without asking the client
+// first, so a run that may not generate has to be told up front — otherwise it
+// spends the turn producing an image the caller never receives.
+func TestBuildRunRequestTellsPlainChatsImagesAreUnavailable(t *testing.T) {
+	systemPromptFor := func(allowImages bool) string {
+		_, blobs, _, err := buildRunRequest("default", []ChatMessage{
+			{Role: "user", Content: "draw me a fox"},
+		}, nil, allowImages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, data := range blobs {
+			var payload map[string]any
+			if json.Unmarshal(data, &payload) != nil {
+				continue
+			}
+			if payload["role"] != "system" {
+				continue
+			}
+			if content, ok := payload["content"].(string); ok {
+				return content
+			}
+		}
+		t.Fatal("run request carries no system prompt")
+		return ""
+	}
+
+	if got := systemPromptFor(false); !strings.Contains(got, "cannot generate images") {
+		t.Fatalf("plain chat is not told images are unavailable: %q", got)
+	}
+	if got := systemPromptFor(true); strings.Contains(got, "cannot generate images") {
+		t.Fatalf("the image model was told it cannot generate: %q", got)
+	}
+}
+
 func TestBuildRunRequestIncludesMcpTools(t *testing.T) {
 	msg, _, _, err := buildRunRequest("default", []ChatMessage{
 		{Role: "user", Content: "weather?"},
@@ -29,7 +64,7 @@ func TestBuildRunRequestIncludesMcpTools(t *testing.T) {
 		Name:        "get_weather",
 		Description: "weather",
 		Parameters:  map[string]any{"type": "object"},
-	}})
+	}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +86,7 @@ func TestBuildRunRequestNativeToolJSON(t *testing.T) {
 		}},
 		{Role: "tool", ToolCallID: "c1", Name: "get_weather", Content: `{"ok":true}`},
 		{Role: "user", Content: "again"},
-	}, nil)
+	}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +129,107 @@ func TestBuildRunRequestNativeToolJSON(t *testing.T) {
 	}
 	if !sawToolCall || !sawToolResult {
 		t.Fatalf("native tool history missing call=%v result=%v", sawToolCall, sawToolResult)
+	}
+}
+
+func TestBuildRunRequestFoldsToolHistoryForClaude(t *testing.T) {
+	// Cursor's Anthropic upstream rejects replayed histories with structured
+	// tool-call/tool-result parts (thinking blocks cannot be restored), so a
+	// claude replay must fold them into plain text.
+	msg, blobs, _, err := buildRunRequest("claude-sonnet-5", []ChatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "checking", ToolCalls: []ToolCall{
+			{ID: "c1", Name: "get_weather", Arguments: map[string]any{"city": "NY"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Name: "get_weather", Content: `{"ok":true}`},
+		{Role: "user", Content: "again"},
+	}, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.GetRunRequest() == nil {
+		t.Fatal("missing run request")
+	}
+	var sawFoldedCall, sawFoldedResult bool
+	for _, data := range blobs {
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		role, _ := payload["role"].(string)
+		if role == "tool" {
+			t.Fatalf("claude replay must not contain tool-role blobs: %#v", payload)
+		}
+		content, _ := payload["content"].([]any)
+		for _, part := range content {
+			m, _ := part.(map[string]any)
+			switch m["type"] {
+			case "tool-call", "tool-result":
+				t.Fatalf("claude replay must not contain structured tool parts: %#v", payload)
+			case "text":
+				text, _ := m["text"].(string)
+				if role == "assistant" && strings.Contains(text, "get_weather") && strings.Contains(text, "c1") {
+					sawFoldedCall = true
+				}
+				if role == "user" && strings.Contains(text, `{"ok":true}`) && strings.Contains(text, "c1") {
+					sawFoldedResult = true
+				}
+			}
+		}
+	}
+	if !sawFoldedCall || !sawFoldedResult {
+		t.Fatalf("folded tool history missing call=%v result=%v", sawFoldedCall, sawFoldedResult)
+	}
+}
+
+func TestBuildRunRequestNamespacesToolNamesForClaude(t *testing.T) {
+	// Anthropic rejects duplicate tool names, and Cursor always registers its
+	// built-in agent tools (Shell, Read, ...). Client tools on claude models
+	// are therefore namespaced on the wire and mapped back on the way out.
+	tools := []ToolDefinition{
+		{Name: "Shell", Description: "run a command",
+			Parameters: map[string]any{"type": "object"}},
+	}
+	msg, _, _, err := buildRunRequest("claude-sonnet-5", []ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, tools, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs := msg.GetRunRequest().GetMcpTools().GetMcpTools()
+	if len(defs) != 1 || defs[0].GetName() != "mcp_Shell" || defs[0].GetToolName() != "mcp_Shell" {
+		t.Fatalf("claude tools must be namespaced on the wire, got %+v", defs)
+	}
+
+	msg, _, _, err = buildRunRequest("grok-4.6", []ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, tools, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs = msg.GetRunRequest().GetMcpTools().GetMcpTools()
+	if len(defs) != 1 || defs[0].GetName() != "Shell" {
+		t.Fatalf("non-claude tools keep their names, got %+v", defs)
+	}
+}
+
+func TestLookupToolResolvesWireNamespacedName(t *testing.T) {
+	tools := []ToolDefinition{{Name: "Shell", Description: "run"}}
+	session := &Session{
+		tools:             tools,
+		toolIndex:         indexTools(tools),
+		renameToolsOnWire: true,
+	}
+	def := session.lookupTool("mcp_Shell", MCPProviderIdentifier)
+	if def == nil || def.Name != "Shell" {
+		t.Fatalf("wire-namespaced tool name must resolve to the client definition, got %+v", def)
+	}
+	if def = session.lookupTool("Shell", MCPProviderIdentifier); def == nil {
+		t.Fatalf("plain name must keep resolving")
+	}
+	names := session.availableToolNames()
+	if len(names) != 1 || names[0] != "mcp_Shell" {
+		t.Fatalf("available tools must use wire names, got %v", names)
 	}
 }
 

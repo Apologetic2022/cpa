@@ -2592,6 +2592,16 @@
       "description": "Cursor Agent GPT-5.4.",
       "context_length": 200000,
       "max_completion_tokens": 65536
+    },
+    {
+      "id": "nano-banana-pro",
+      "object": "model",
+      "created": 1740960000,
+      "owned_by": "cursor",
+      "type": "openai-image",
+      "display_name": "Nano Banana Pro",
+      "name": "nano-banana-pro",
+      "description": "Image generation model. Upscales to 2K/4K when the prompt asks for it."
     }
   ]
 }
