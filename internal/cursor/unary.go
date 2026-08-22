@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,8 +19,13 @@ import (
 
 const availableModelsPath = "/aiserver.v1.AiService/AvailableModels"
 
-// UnaryPOSTWithHeader performs a Cursor Connect unary RPC with raw
-// application/proto body and returns the response headers (Set-Cookie).
+// UnaryPOST performs a Cursor Connect unary RPC with raw application/proto body.
+func UnaryPOST(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) error {
+	_, err := UnaryPOSTWithHeader(ctx, baseURL, path, headers, req, resp)
+	return err
+}
+
+// UnaryPOSTWithHeader is UnaryPOST and also returns response headers (Set-Cookie).
 func UnaryPOSTWithHeader(ctx context.Context, baseURL, path string, headers map[string]string, req proto.Message, resp proto.Message) (http.Header, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
@@ -48,7 +54,10 @@ func UnaryPOSTWithHeader(ctx context.Context, baseURL, path string, headers map[
 	httpReq.ProtoMajor = 2
 
 	transport := &http2.Transport{
-		DialTLSContext: dialTLSViaEnvProxy,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			d := &tls.Dialer{Config: cfg}
+			return d.DialContext(ctx, network, addr)
+		},
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"h2", "http/1.1"},

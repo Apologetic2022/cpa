@@ -470,7 +470,7 @@ func validVariantParameters(model *aiserverv1.AvailableModelsResponse_AvailableM
 
 // CatalogToModelInfos converts Cursor catalog rows into CPA registry models.
 func CatalogToModelInfos(models []CatalogModel) []*registry.ModelInfo {
-	out := make([]*registry.ModelInfo, 0, len(models)+2)
+	out := make([]*registry.ModelInfo, 0, len(models)+1)
 	seen := map[string]struct{}{}
 	// Keep the Agent "default" selector visible even when the catalog is rich.
 	out = append(out, &registry.ModelInfo{
@@ -484,10 +484,6 @@ func CatalogToModelInfos(models []CatalogModel) []*registry.ModelInfo {
 		Description: "Cursor Agent default model selector.",
 	})
 	seen["default"] = struct{}{}
-	// The image generation pseudo-model is not part of Cursor's catalog; keep
-	// it registered so /v1/images requests keep routing to this provider.
-	out = append(out, registry.ImageBuiltinModel())
-	seen[registry.ImageModelID] = struct{}{}
 	for _, model := range models {
 		id := strings.TrimSpace(model.ID)
 		if id == "" {

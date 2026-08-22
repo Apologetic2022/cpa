@@ -28,7 +28,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cursorlib "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
@@ -509,20 +508,6 @@ func (s *Server) setupRoutes() {
 	s.engine.HEAD("/healthz", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-
-	// Generated images are served without the API-key middleware: the chat
-	// client fetching them is a markdown renderer, not an API caller, and it
-	// sends no credentials. The unguessable name in the URL is the capability.
-	// The /v1 alias is registered on the engine rather than the authenticated
-	// group for the same reason.
-	s.engine.GET(cursorlib.PublishedImageRoute, serveGeneratedImage)
-	s.engine.HEAD(cursorlib.PublishedImageRoute, serveGeneratedImage)
-	s.engine.GET(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
-	s.engine.HEAD(cursorlib.PublishedImageAPIRoute, serveGeneratedImage)
-	s.engine.GET(cursorlib.PublishedImageLegacyRoute, serveGeneratedImage)
-	s.engine.HEAD(cursorlib.PublishedImageLegacyRoute, serveGeneratedImage)
-	cursorlib.StartPublishedImageJanitor()
-
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -634,36 +619,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
-}
-
-// serveGeneratedImage returns an image produced by a provider's server-side
-// image tool, decoded, as ordinary image bytes. Responses reference it by URL
-// so the client's markdown sanitizer renders it; data: URLs and the provider's
-// own local file paths never survive that sanitizer.
-func serveGeneratedImage(c *gin.Context) {
-	name := c.Param("name")
-	if name == "" && c.Request != nil && c.Request.URL != nil {
-		name = cursorlib.PublishedImageName(c.Request.URL.Path)
-	}
-	data, mime, ok := cursorlib.LookupPublishedImage(name)
-	if !ok {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	c.Header("Cache-Control", "private, max-age=3600")
-	c.Header("X-Content-Type-Options", "nosniff")
-	// The renderer displaying the image lives on a different origin than this
-	// gateway. An <img> tag would not care, but a client that fetches the
-	// bytes itself to build a blob needs both of these to read the response.
-	c.Header("Access-Control-Allow-Origin", "*")
-	c.Header("Cross-Origin-Resource-Policy", "cross-origin")
-	if c.Request != nil && c.Request.Method == http.MethodHead {
-		c.Header("Content-Type", mime)
-		c.Header("Content-Length", strconv.Itoa(len(data)))
-		c.Status(http.StatusOK)
-		return
-	}
-	c.Data(http.StatusOK, mime, data)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
@@ -822,12 +777,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
-		mgmt.GET("/cursor-api-key", s.mgmt.GetCursorKeys)
-		mgmt.POST("/cursor-api-key", s.mgmt.CreateCursorKey)
-		mgmt.PUT("/cursor-api-key", s.mgmt.PutCursorKeys)
-		mgmt.PATCH("/cursor-api-key", s.mgmt.PatchCursorKey)
-		mgmt.DELETE("/cursor-api-key", s.mgmt.DeleteCursorKey)
-
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
@@ -927,17 +876,6 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
-	// A base URL that carries a path of its own turns the reply's host-less
-	// image reference into "/<prefix>/v1/images/<name>", which matches no
-	// route. The name still identifies the image, so serve it rather than
-	// letting the picture break over a prefix the gateway never sees.
-	if method := c.Request.Method; method == http.MethodGet || method == http.MethodHead {
-		if cursorlib.PublishedImageName(path) != "" {
-			serveGeneratedImage(c)
-			c.Abort()
-			return
-		}
-	}
 	if strings.HasPrefix(path, "/v0/resource/plugins/") {
 		s.pluginResourceNoRoute(c)
 		return
@@ -1013,22 +951,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		log.WithError(err).Error("failed to read management control panel asset")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	// The upstream panel knows nothing about the Cursor provider; patch the
-	// Cursor API key manager page in at serve time. On failure serve the
-	// pristine panel rather than breaking the whole control panel.
-	html, errInject := managementasset.AddCursorAPIKeyManagerToManagementHTML(string(data))
-	if errInject != nil {
-		log.WithError(errInject).Warn("failed to inject Cursor API key manager into management control panel")
-	}
-
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	c.File(filePath)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1288,7 +1211,7 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 		maxOutput = registry.DefaultClaudeMaxOutputTokens
 	}
 	model := map[string]any{
-		"id":               entry.id,
+		"id":               util.EnsureClaudeModelIDPrefix(entry.id),
 		"object":           "model",
 		"owned_by":         entry.ownedBy,
 		"type":             "model",

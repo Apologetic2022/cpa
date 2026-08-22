@@ -235,36 +235,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-	// Cursor keys (do not print key material)
-	if len(oldCfg.CursorKey) != len(newCfg.CursorKey) {
-		changes = append(changes, fmt.Sprintf("cursor-api-key count: %d -> %d", len(oldCfg.CursorKey), len(newCfg.CursorKey)))
-	} else {
-		for i := range oldCfg.CursorKey {
-			o := oldCfg.CursorKey[i]
-			n := newCfg.CursorKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("cursor[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("cursor[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
-				changes = append(changes, fmt.Sprintf("cursor[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("cursor[%d].api-key: updated", i))
-			}
-			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
-			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("cursor[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-			if o.Disabled != n.Disabled {
-				changes = append(changes, fmt.Sprintf("cursor[%d].disabled: %t -> %t", i, o.Disabled, n.Disabled))
-			}
-		}
-	}
-
 	// Codex keys (do not print key material)
 	if len(oldCfg.CodexKey) != len(newCfg.CodexKey) {
 		changes = append(changes, fmt.Sprintf("codex-api-key count: %d -> %d", len(oldCfg.CodexKey), len(newCfg.CodexKey)))

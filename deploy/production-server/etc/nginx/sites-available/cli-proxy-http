@@ -4,35 +4,15 @@ server {
     server_name _;
 
     client_max_body_size 50m;
-    # ACME HTTP-01 challenge for the sslip.io hostname certificate.
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/acme;
-        default_type "text/plain";
-    }
-
-    # An image link handed out over plain http still has to load: send it to
-    # the origin every client can validate. /v1/images/ is deliberately not
-    # redirected here — POST /v1/images/generations shares that prefix.
-    # /cursor-images/ is the prefix this gateway used before /media/; links
-    # already in a chat history keep resolving until their bytes expire.
-    location ^~ /media/ {
-        return 301 https://0fcc5ed6.sslip.io$request_uri;
-    }
-
-    location ^~ /cursor-images/ {
-        return 301 https://0fcc5ed6.sslip.io$request_uri;
-    }
-
     location / {
         proxy_pass http://127.0.0.1:8317;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 1800s;
-        proxy_send_timeout 1800s;
+        proxy_read_timeout 900s;
+        proxy_send_timeout 900s;
     }
 }

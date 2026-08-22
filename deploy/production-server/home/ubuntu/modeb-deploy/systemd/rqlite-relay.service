@@ -1,0 +1,19 @@
+[Unit]
+Description=rqlited for CLIProxy relay authority (affinity + ban FSM, docs F8/F20)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Single-node Raft: linearizable reads are served by the local leader. Data lives in
+# /opt/cli-proxy/rqlite. The relay gateway reads/writes plaintext HTTP on 127.0.0.1:4001.
+ExecStart=/usr/local/bin/rqlited -node-id relay-1 -http-addr 127.0.0.1:4001 -raft-addr 127.0.0.1:4002 /opt/cli-proxy/rqlite
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/cli-proxy
+
+[Install]
+WantedBy=multi-user.target

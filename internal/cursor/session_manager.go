@@ -1,12 +1,9 @@
 package cursor
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -55,35 +52,40 @@ func (m *SessionManager) Register(session *Session) {
 	session.touch()
 }
 
-// BindPending indexes a tool_call_id to its owning session. Keys are
-// normalised so a client that echoes back a protocol-sanitised id still
-// resolves to the session that issued the call.
+// BindPending indexes a tool_call_id to its owning session.
 func (m *SessionManager) BindPending(toolCallID string, session *Session) {
-	key := NormalizeToolCallID(toolCallID)
-	if m == nil || session == nil || key == "" {
+	if m == nil || session == nil || toolCallID == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pending[key] = session
+	m.pending[toolCallID] = session
 	session.touch()
 }
 
 // UnbindPending removes a tool_call_id index.
 func (m *SessionManager) UnbindPending(toolCallID string) {
-	key := NormalizeToolCallID(toolCallID)
-	if m == nil || key == "" {
+	if m == nil || toolCallID == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.pending, key)
+	delete(m.pending, toolCallID)
 }
 
-// ErrToolSessionLost reports that the Agent run a tool result belongs to is no
-// longer available: it expired, the gateway restarted, or the run was torn
-// down. Callers replay the conversation instead of failing the request.
-var ErrToolSessionLost = errors.New("cursor: tool call session is no longer available")
+// LookupPending returns the session waiting for the given tool call.
+func (m *SessionManager) LookupPending(toolCallID string) *Session {
+	if m == nil || toolCallID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session := m.pending[toolCallID]
+	if session != nil {
+		session.touch()
+	}
+	return session
+}
 
 // ResolveForToolResults finds the single live session that owns all results.
 func (m *SessionManager) ResolveForToolResults(results []ToolResult) (*Session, error) {
@@ -94,14 +96,12 @@ func (m *SessionManager) ResolveForToolResults(results []ToolResult) (*Session, 
 	defer m.mu.Unlock()
 	var owner *Session
 	for _, result := range results {
-		key := NormalizeToolCallID(result.ToolCallID)
-		if key == "" {
+		if result.ToolCallID == "" {
 			return nil, fmt.Errorf("cursor: tool result missing tool_call_id")
 		}
-		session := m.pending[key]
+		session := m.pending[result.ToolCallID]
 		if session == nil {
-			log.Debugf("cursor session lookup miss: tool_call_id=%s live_sessions=%d pending_calls=%d", key, len(m.sessions), len(m.pending))
-			return nil, fmt.Errorf("%w (tool_call_id %s)", ErrToolSessionLost, key)
+			return nil, fmt.Errorf("cursor: unknown or expired tool_call_id %s", result.ToolCallID)
 		}
 		if owner == nil {
 			owner = session

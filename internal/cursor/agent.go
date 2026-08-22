@@ -5,8 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -26,9 +24,7 @@ type ChatMessage struct {
 
 // AccountCredentials are the fields required to open an Agent run.
 type AccountCredentials struct {
-	AccessToken string
-	// APIKey is a Cursor user API key (crsr_...) exchangeable for access tokens.
-	APIKey        string
+	AccessToken   string
 	RefreshToken  string
 	AuthClientID  string
 	BaseURL       string
@@ -61,7 +57,6 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	}
 	creds := AccountCredentials{
 		AccessToken:   get("access_token"),
-		APIKey:        get("api_key"),
 		RefreshToken:  get("refresh_token"),
 		AuthClientID:  get("auth_client_id"),
 		BaseURL:       get("base_url"),
@@ -81,9 +76,7 @@ func CredentialsFromMetadata(meta map[string]any) AccountCredentials {
 	if creds.ClientVersion == "" {
 		creds.ClientVersion = cursorauth.DefaultClientVersion
 	}
-	// API-key credentials refresh via /auth/exchange_user_api_key, which the
-	// auth service selects only when no OAuth client ID is present.
-	if creds.AuthClientID == "" && creds.APIKey == "" {
+	if creds.AuthClientID == "" {
 		creds.AuthClientID = cursorauth.DefaultAuthClientID
 	}
 	if creds.MachineID == "" {
@@ -119,297 +112,33 @@ func storeBlob(store map[string][]byte, data []byte) []byte {
 	return id
 }
 
-// splitActiveUser separates the trailing user message that drives the next
-// turn from the history preceding it. The history slice is exactly what a
-// client echoes back before its *next* user message, which makes it the
-// conversation-cache lookup key.
-func splitActiveUser(messages []ChatMessage) ([]ChatMessage, *ChatMessage, error) {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			return messages[:i], &messages[i], nil
-		}
-	}
-	return nil, nil, fmt.Errorf("cursor: request has no user message")
-}
-
-// historyHasAssistant reports whether the history already contains a model
-// reply, i.e. the request is a follow-up turn rather than the start of a new
-// conversation.
-func historyHasAssistant(messages []ChatMessage) bool {
-	for i := range messages {
-		if messages[i].Role == "assistant" {
-			return true
-		}
-	}
-	return false
-}
-
-// splitTrailingUserRun splits a request into the transcript prefix a stored
-// checkpoint could cover (everything up to the last non-user message) and the
-// trailing run of user messages that make up the new turn. Checkpoints are
-// stored at turn end, when the transcript closes with the assistant reply, so
-// every user message after that reply belongs to the incoming turn — clients
-// like the Cursor CLI send several per turn (reminders, todo lists, then the
-// actual question).
-func splitTrailingUserRun(messages []ChatMessage) (prefix, turn []ChatMessage) {
-	i := len(messages)
-	for i > 0 && messages[i-1].Role == "user" {
-		i--
-	}
-	return messages[:i], messages[i:]
-}
-
-// joinedUserText renders a run of user messages as the single user message a
-// resumed turn sends upstream.
-func joinedUserText(turn []ChatMessage) string {
-	parts := make([]string, 0, len(turn))
-	for i := range turn {
-		if content := strings.TrimSpace(turn[i].Content); content != "" {
-			parts = append(parts, turn[i].Content)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-// foldTurnTailResultLimit caps each tool result repeated in a folded turn
-// tail. Unlike the lost-session replay note, the fold is the only place the
-// result reaches the model on a checkpoint resume, so the cap is generous.
-const foldTurnTailResultLimit = 20000
-
-// foldTurnTailText renders the un-checkpointed tail of a request — the user
-// messages, partial assistant reply, tool calls and tool results that came
-// after the last completed turn — as the single user message a checkpoint
-// resume can carry. A resumed run only accepts text for its new turn, so the
-// structured tail has to be restated in prose. The synthetic lost-session
-// replay note is skipped: it merely truncates the same tool results that are
-// folded here in full.
-func foldTurnTailText(tail []ChatMessage) string {
-	var b strings.Builder
-	toolActivity := false
-	write := func(s string) {
-		if strings.TrimSpace(s) == "" {
-			return
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(s)
-	}
-	for i := range tail {
-		msg := &tail[i]
-		switch msg.Role {
-		case "user", "system":
-			if strings.HasPrefix(strings.TrimSpace(msg.Content), replayNoteMarker) {
-				continue
-			}
-			write(msg.Content)
-		case "assistant":
-			if strings.TrimSpace(msg.Content) != "" {
-				write("[your reply so far]\n" + msg.Content)
-			}
-			for j := range msg.ToolCalls {
-				toolActivity = true
-				write(foldToolCallText(&msg.ToolCalls[j]))
-			}
-		case "tool":
-			toolActivity = true
-			content := msg.Content
-			if len(content) > foldTurnTailResultLimit {
-				content = content[:foldTurnTailResultLimit] + "\n… (truncated)"
-			}
-			write(fmt.Sprintf("[tool result %s id=%s]\n%s", strings.TrimSpace(msg.Name), NormalizeToolCallID(msg.ToolCallID), content))
-		}
-	}
-	if toolActivity {
-		write("[The tool calls above have already run; continue the task from their results and do not repeat them.]")
-	}
-	return b.String()
-}
-
-// maxCheckpointBoundaryProbes bounds how many turn-end boundaries a fallback
-// lookup hashes. The last completed turn sits near the end of the request, so
-// a handful of probes is enough.
-const maxCheckpointBoundaryProbes = 8
-
-// lookupTurnBoundaryResume probes older turn-end boundaries of a request for
-// a stored checkpoint when the trailing-user-run lookup found none. It covers
-// the requests that split cannot: a tool-result continuation whose live
-// session is gone (the trailing messages are tool results, not a user run),
-// and a client that rewrote its recent history. Checkpoints are stored at
-// turn end, when the transcript closes with an assistant text reply, so only
-// those positions are probed. On a hit the entry is returned together with
-// the folded tail that becomes the resumed turn's user message.
-func lookupTurnBoundaryResume(accountKey, wireModelID string, messages []ChatMessage) (*convEntry, string, string, bool) {
-	probes := 0
-	for i := len(messages) - 1; i >= 1 && probes < maxCheckpointBoundaryProbes; i-- {
-		prev := &messages[i-1]
-		if prev.Role != "assistant" || strings.TrimSpace(prev.Content) == "" || len(prev.ToolCalls) > 0 {
-			continue
-		}
-		probes++
-		fingerprint := conversationFingerprint(messages[:i])
-		entry, ok := defaultConversationCache.LookupNoWait(accountKey, fingerprint)
-		if !ok {
-			continue
-		}
-		if entry.model != wireModelID {
-			// The conversation is pinned to another model upstream; an older
-			// boundary would be, too.
-			return nil, "", "", false
-		}
-		text := foldTurnTailText(messages[i:])
-		if strings.TrimSpace(text) == "" {
-			return nil, "", "", false
-		}
-		return entry, fingerprint, text, true
-	}
-	return nil, "", "", false
-}
-
-// resolveRunModelDetails applies catalog overrides to a model selection and
-// renders the ModelDetails proto the Agent run needs.
-func resolveRunModelDetails(selection *ModelSelection) *agentv1.ModelDetails {
-	publicID := selection.PublicID
-	if publicID == "" {
-		publicID = selection.ModelID
-	}
-	wireID := selection.ModelID
-	displayID := publicID
-	displayName := publicID
-	if entry, ok := catalogEntry(publicID); ok {
-		if entry.DisplayModel != "" {
-			displayID = entry.DisplayModel
-		}
-		if entry.DisplayName != "" {
-			displayName = entry.DisplayName
-		}
-		selection.MaxMode = selection.MaxMode || entry.MaxMode
-		if !selection.VariantStringRepr && len(selection.Parameters) == 0 && len(entry.Parameters) > 0 {
-			selection.Parameters = append([]ModelParameter(nil), entry.Parameters...)
-		}
-		if selection.VariantStringRepr && strings.TrimSpace(entry.WireID) != "" {
-			wireID = entry.WireID
-			selection.ModelID = wireID
-		}
-	}
-	details := &agentv1.ModelDetails{ModelId: wireID, DisplayModelId: displayID, DisplayName: displayName}
-	if selection.MaxMode {
-		maxMode := true
-		details.MaxMode = &maxMode
-	}
-	return details
-}
-
-// buildResumeRunRequest continues a previously checkpointed conversation: the
-// server restores the turns it emitted through conversation_checkpoint_update
-// and only the new user message is appended. Keeping the conversation_id is
-// what preserves Cursor's provider-side prompt cache across gateway turns.
-func buildResumeRunRequest(model string, entry *convEntry, userText string, tools []ToolDefinition) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
-	if entry == nil || entry.state == nil || strings.TrimSpace(entry.conversationID) == "" {
-		return nil, nil, "", fmt.Errorf("cursor: no conversation checkpoint to resume")
-	}
+func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
-	details := resolveRunModelDetails(&selection)
-	// The original run's blobs stay resolvable: the server may still KV-fetch
-	// root prompt messages referenced by the checkpointed turns.
-	blobStore := make(map[string][]byte, len(entry.blobs))
-	for k, v := range entry.blobs {
-		blobStore[k] = v
-	}
-	conversationID := entry.conversationID
-	supportsImages := true
-	run := &agentv1.AgentRunRequest{
-		ConversationId:             &conversationID,
-		ConversationState:          entry.state,
-		ModelDetails:               details,
-		RequestedModel:             toRequestedModelProto(selection),
-		ClientSupportsInlineImages: &supportsImages,
-		Action: &agentv1.ConversationAction{
-			Action: &agentv1.ConversationAction_UserMessageAction{
-				UserMessageAction: &agentv1.UserMessageAction{
-					UserMessage: &agentv1.UserMessage{
-						Text:      userText,
-						MessageId: uuid.NewString(),
-					},
-				},
-			},
-		},
-	}
-	if defs := buildMcpToolDefinitions(tools, claudeWireModel(selection.ModelID)); len(defs) > 0 {
-		run.McpTools = &agentv1.McpTools{McpTools: defs}
-	}
-	client := &agentv1.AgentClientMessage{
-		Message: &agentv1.AgentClientMessage_RunRequest{RunRequest: run},
-	}
-	return client, blobStore, conversationID, nil
-}
-
-// claudeWireModel reports whether a wire model id is served by Cursor's
-// Anthropic upstream. That upstream is strict about the request Cursor
-// constructs from an Agent run, so two claude-only accommodations hang off
-// this predicate:
-//
-//  1. Client tool names are namespaced on the wire (see mcpToolWirePrefix):
-//     Cursor registers its built-in agent tools (Shell, Read, Grep, ...)
-//     alongside the MCP tools, and Anthropic rejects the duplicate names
-//     with ERROR_PROVIDER_ERROR / provider 400 (not retryable). Claude Code
-//     style clients use exactly those names, so without the rename every
-//     tool-bearing claude run died before producing a single token. Grok /
-//     composer upstreams tolerate the duplicates, and renaming there would
-//     needlessly change what working traffic sees.
-//  2. Replayed histories fold tool calls and results into plain text
-//     instead of structured tool-call/tool-result parts, which the upstream
-//     cannot always restore for thinking models.
-func claudeWireModel(wireModelID string) bool {
-	return strings.Contains(strings.ToLower(wireModelID), "claude")
-}
-
-// foldToolCallText renders one historical tool call as plain text.
-func foldToolCallText(tc *ToolCall) string {
-	args := "{}"
-	if len(tc.Arguments) > 0 {
-		if b, err := json.Marshal(tc.Arguments); err == nil {
-			args = string(b)
-		}
-	}
-	return fmt.Sprintf("[called tool %s id=%s arguments=%s]", strings.TrimSpace(tc.Name), NormalizeToolCallID(tc.ID), args)
-}
-
-func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
-	selection := ResolveRequestedModel(model)
-	claudeUpstream := claudeWireModel(selection.ModelID)
+	model = selection.ModelID
 	blobStore := map[string][]byte{}
 	systemPrompt := "You are a helpful assistant."
-	if !allowImages {
-		// Cursor's server runs GenerateImage without waiting for the client
-		// in some flows, and its result is discarded on a conversation that
-		// may not generate. Saying so up front is what keeps the model from
-		// spending half a minute on an image nobody will receive and then
-		// reporting it as delivered.
-		systemPrompt += " You cannot generate images in this conversation: your image generation tool is unavailable. If the user asks for an image, say so plainly instead of calling the tool or claiming an image was produced."
-	}
-	if claudeUpstream && len(tools) > 0 {
-		// Client tools are registered under mcp_-prefixed names on claude
-		// (see claudeWireModel). Without this note the model burns whole
-		// segments retrying the workspace built-ins of the same name, which
-		// run nowhere in this headless setup.
-		systemPrompt += " Tool note: only the mcp_-prefixed tools attached to this conversation actually work here. Built-in workspace tools (Shell, Read, Grep, Glob, Edit, Write, ...) are unavailable; do not call them or wait on them."
-	}
 	systemBlob := storeBlob(blobStore, mustJSON(map[string]any{
 		"role":    "system",
 		"content": systemPrompt,
 	}))
 
-	history, activeUser, err := splitActiveUser(messages)
-	if err != nil {
-		return nil, nil, "", err
+	var activeUser *ChatMessage
+	historyEnd := len(messages)
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			activeUser = &messages[i]
+			historyEnd = i
+			break
+		}
+	}
+	if activeUser == nil {
+		return nil, nil, "", fmt.Errorf("cursor: request has no user message")
 	}
 
 	// Track tool names so tool-result parts can include toolName (cursor2api).
 	toolNames := map[string]string{}
-	foldTools := claudeUpstream
 	rootIDs := [][]byte{systemBlob}
-	for _, msg := range history {
+	for _, msg := range messages[:historyEnd] {
 		switch msg.Role {
 		case "user":
 			if strings.TrimSpace(msg.Content) == "" {
@@ -423,29 +152,6 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			})))
 		case "assistant":
 			if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 {
-				continue
-			}
-			if foldTools {
-				var b strings.Builder
-				if strings.TrimSpace(msg.Content) != "" {
-					b.WriteString(msg.Content)
-				}
-				for i := range msg.ToolCalls {
-					tc := &msg.ToolCalls[i]
-					if strings.TrimSpace(tc.ID) != "" && strings.TrimSpace(tc.Name) != "" {
-						toolNames[tc.ID] = tc.Name
-					}
-					if b.Len() > 0 {
-						b.WriteString("\n\n")
-					}
-					b.WriteString(foldToolCallText(tc))
-				}
-				rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
-					"role": "assistant",
-					"content": []map[string]string{
-						{"type": "text", "text": b.String()},
-					},
-				})))
 				continue
 			}
 			content := make([]map[string]any, 0, 1+len(msg.ToolCalls))
@@ -485,16 +191,6 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			if toolName == "" {
 				toolName = toolNames[msg.ToolCallID]
 			}
-			if foldTools {
-				text := fmt.Sprintf("[tool result %s id=%s]\n%s", toolName, NormalizeToolCallID(msg.ToolCallID), msg.Content)
-				rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
-					"role": "user",
-					"content": []map[string]string{
-						{"type": "text", "text": text},
-					},
-				})))
-				continue
-			}
 			resultPart := map[string]any{
 				"type":       "tool-result",
 				"toolName":   toolName,
@@ -525,7 +221,34 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 	// forcing it true is rejected for many accounts ("Workspace context
 	// exclusion is not allowed…").
 	supportsImages := true
-	details := resolveRunModelDetails(&selection)
+	publicID := selection.PublicID
+	if publicID == "" {
+		publicID = model
+	}
+	wireID := selection.ModelID
+	displayID := publicID
+	displayName := publicID
+	if entry, ok := catalogEntry(publicID); ok {
+		if entry.DisplayModel != "" {
+			displayID = entry.DisplayModel
+		}
+		if entry.DisplayName != "" {
+			displayName = entry.DisplayName
+		}
+		selection.MaxMode = selection.MaxMode || entry.MaxMode
+		if !selection.VariantStringRepr && len(selection.Parameters) == 0 && len(entry.Parameters) > 0 {
+			selection.Parameters = append([]ModelParameter(nil), entry.Parameters...)
+		}
+		if selection.VariantStringRepr && strings.TrimSpace(entry.WireID) != "" {
+			wireID = entry.WireID
+			selection.ModelID = wireID
+		}
+	}
+	details := &agentv1.ModelDetails{ModelId: wireID, DisplayModelId: displayID, DisplayName: displayName}
+	if selection.MaxMode {
+		maxMode := true
+		details.MaxMode = &maxMode
+	}
 	run := &agentv1.AgentRunRequest{
 		ConversationId:             &conversationID,
 		ConversationState:          &agentv1.ConversationStateStructure{RootPromptMessagesJson: rootIDs},
@@ -543,7 +266,7 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			},
 		},
 	}
-	if defs := buildMcpToolDefinitions(tools, claudeUpstream); len(defs) > 0 {
+	if defs := buildMcpToolDefinitions(tools); len(defs) > 0 {
 		run.McpTools = &agentv1.McpTools{McpTools: defs}
 	}
 	client := &agentv1.AgentClientMessage{
@@ -605,128 +328,10 @@ func sendExecStreamClose(stream *BidiStream, id uint32) error {
 	return stream.WriteEnvelope(payload, false)
 }
 
-// headlessWorkspaceEnv returns a minimal environment describing a real
-// workspace/project directory. Server-side tools such as GenerateImage refuse
-// to run without one ("needs a workspace/project folder"), so a headless
-// client must still advertise concrete paths even though it never writes the
-// files itself (the image is returned inline as base64).
-func headlessWorkspaceEnv() *agentv1.RequestContextEnv {
-	root, project := headlessWorkspaceRoot()
-	artifacts := filepath.Join(project, "assets")
-	transcripts := filepath.Join(project, "transcripts")
-	terminals := filepath.Join(project, "terminals")
-	tz := "UTC"
-	return &agentv1.RequestContextEnv{
-		OsVersion:              DesktopClientOS(),
-		WorkspacePaths:         []string{root},
-		Shell:                  "/bin/bash",
-		TerminalsFolder:        terminals,
-		TimeZone:               tz,
-		ProjectFolder:          project,
-		AgentTranscriptsFolder: transcripts,
-		ArtifactsFolder:        &artifacts,
-	}
-}
-
-// headlessWorkspaceRoot creates and returns a stable per-process workspace root
-// plus the ~/.cursor/projects/<slug> project folder Cursor expects. The Agent
-// treats these as an open folder so server-side tools (GenerateImage) have a
-// valid destination; the image itself is still returned inline as base64.
-func headlessWorkspaceRoot() (root, project string) {
-	base := os.TempDir()
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		base = home
-	}
-	root = filepath.Join(base, "cliproxy-cursor-workspace")
-	project = filepath.Join(base, ".cursor", "projects", "cliproxy-cursor-workspace")
-	for _, dir := range []string{
-		root,
-		filepath.Join(root, "assets"),
-		project,
-		filepath.Join(project, "assets"),
-		filepath.Join(project, "transcripts"),
-		filepath.Join(project, "terminals"),
-	} {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	return root, project
-}
-
-// referenceImageDir is the folder inside the headless project that reference
-// images are advertised under. Cursor only ever sees these paths through
-// GenerateImageArgs.reference_image_paths and reads them back over the read
-// exec, so the directory does not need to exist on disk.
-func referenceImageDir() string {
-	_, project := headlessWorkspaceRoot()
-	return filepath.Join(project, "assets", "references")
-}
-
-// ReferenceImagePath builds the workspace path advertised for the index-th
-// reference image of a run. The extension is derived from the MIME type so the
-// server can infer the format from the path alone.
-func ReferenceImagePath(index int, mimeType string) string {
-	return filepath.Join(referenceImageDir(), fmt.Sprintf("reference-%d%s", index+1, imageExtension(mimeType)))
-}
-
-// headlessWorkspaceDirName is the folder the headless workspace and its Cursor
-// project are always named after. Paths carrying this segment came from this
-// client's own advertised environment and never exist on disk.
-const headlessWorkspaceDirName = "cliproxy-cursor-workspace"
-
-// IsHeadlessWorkspacePath reports whether a path points inside the workspace
-// this client advertises to Cursor. Such paths are what server-side tools echo
-// back (GenerateImage names its output there), and they never resolve on the
-// relay host, so callers must not surface them as if they were fetchable.
-func IsHeadlessWorkspacePath(p string) bool {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return false
-	}
-	cleaned := filepath.Clean(p)
-	root, project := headlessWorkspaceRoot()
-	for _, base := range []string{root, project} {
-		if rel, err := filepath.Rel(base, cleaned); err == nil &&
-			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return true
-		}
-	}
-	// The service account's home differs between deployments, so also accept
-	// the workspace folder name appearing anywhere in the path.
-	for _, segment := range strings.Split(filepath.ToSlash(cleaned), "/") {
-		if segment == headlessWorkspaceDirName {
-			return true
-		}
-	}
-	return false
-}
-
-// writeHeadlessWorkspaceFile persists server-delivered file bytes (e.g. the
-// GenerateImage PNG) when the target lies inside the headless workspace or
-// project folder. Failures are ignored: the bytes are returned inline anyway.
-func writeHeadlessWorkspaceFile(path string, data []byte) {
-	if strings.TrimSpace(path) == "" || len(data) == 0 {
-		return
-	}
-	root, project := headlessWorkspaceRoot()
-	cleaned := filepath.Clean(path)
-	inside := func(base string) bool {
-		rel, err := filepath.Rel(base, cleaned)
-		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-	}
-	if !inside(root) && !inside(project) {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(cleaned, data, 0o644)
-}
-
 func headlessRequestContext() *agentv1.RequestContext {
 	trueVal := true
 	falseVal := false
 	ctx := &agentv1.RequestContext{
-		Env:                         headlessWorkspaceEnv(),
 		EnvInfoComplete:             &trueVal,
 		RulesInfoComplete:           &trueVal,
 		RepositoryInfoComplete:      &trueVal,

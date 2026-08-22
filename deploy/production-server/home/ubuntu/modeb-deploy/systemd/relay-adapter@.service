@@ -1,0 +1,28 @@
+[Unit]
+Description=CC relay adapter (%i) — real Claude Code via Agent SDK streaming-input
+After=network-online.target cli-proxy-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cli-proxy/adapter
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/cli-proxy/agents/%i.env
+# Docs 6.7.1: the gateway<->agent data plane is a per-account Unix domain socket —
+# never TCP loopback on Linux (enumerable/poolable). The socket is group-accessible to
+# the "relay" group so the gateway (dedicated cliproxy user, supplementary relay group)
+# can connect while nothing else can.
+Group=relay
+UMask=0007
+RuntimeDirectory=relay
+RuntimeDirectoryMode=0770
+ExecStart=/usr/bin/node /opt/cli-proxy/adapter/adapter.mjs --listen ${ADAPTER_LISTEN} --claude ${CLAUDE_BIN} --cwd ${PERSONA_CWD} --store /opt/cli-proxy/agents/%i.sessions.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/cli-proxy
+
+[Install]
+WantedBy=multi-user.target

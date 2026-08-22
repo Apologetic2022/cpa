@@ -35,6 +35,75 @@ type ClientProfile struct {
 	CookieJar     *CookieJar
 }
 
+// ProfileFromAuth builds a ClientProfile from auth metadata/storage fields.
+func ProfileFromAuth(meta map[string]any) ClientProfile {
+	get := func(keys ...string) string {
+		for _, key := range keys {
+			if meta == nil {
+				continue
+			}
+			if v, ok := meta[key]; ok {
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					return strings.TrimSpace(s)
+				}
+			}
+		}
+		return ""
+	}
+	machineID := get("machine_id")
+	if machineID == "" {
+		machineID = DesktopMachineID()
+	}
+	macMachineID := get("mac_machine_id")
+	if macMachineID == "" {
+		macMachineID = DesktopMacMachineID()
+	}
+	sessionID := get("session_id")
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	version := get("client_version")
+	if version == "" {
+		version = cursorauth.DefaultClientVersion
+	}
+	clientOS := get("client_os")
+	if clientOS == "" {
+		clientOS = DesktopClientOS()
+	}
+	clientArch := get("client_arch")
+	if clientArch == "" {
+		clientArch = DesktopClientArch()
+	}
+	ghost := get("ghost_mode")
+	if ghost == "" {
+		// Desktop / cursor2api default when privacy_mode is unset.
+		ghost = "implicit-false"
+	}
+	baseURL := get("base_url")
+	if baseURL == "" {
+		baseURL = cursorauth.DefaultBaseURL
+	}
+	jarKey := get("email")
+	if jarKey == "" {
+		jarKey = machineID
+	}
+	return ClientProfile{
+		Version:       version,
+		ClientType:    "ide",
+		ClientLayout:  "editor",
+		GhostMode:     ghost,
+		MachineID:     machineID,
+		MacMachineID:  macMachineID,
+		Timezone:      get("timezone"),
+		ClientOS:      clientOS,
+		ClientArch:    clientArch,
+		SessionID:     sessionID,
+		IdentityScope: machineID,
+		BaseURL:       baseURL,
+		CookieJar:     CookieJarForAccount(jarKey),
+	}
+}
+
 // ProfileFromCredentials builds a ClientProfile from account credentials.
 func ProfileFromCredentials(creds AccountCredentials) ClientProfile {
 	ghost := strings.TrimSpace(creds.GhostMode)

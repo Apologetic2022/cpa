@@ -71,6 +71,9 @@ type Envelope struct {
 	Payload []byte
 }
 
+// Compressed reports whether the envelope payload is compressed.
+func (e Envelope) Compressed() bool { return e.Flags&flagCompressed != 0 }
+
 // EndStream reports whether this is a Connect end-stream trailer frame.
 func (e Envelope) EndStream() bool { return e.Flags&flagEndStream != 0 }
 

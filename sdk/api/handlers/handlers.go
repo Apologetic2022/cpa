@@ -260,7 +260,6 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Only include it if the client explicitly provides it.
 	key := ""
 	requestPath := ""
-	baseURL := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
@@ -268,7 +267,6 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 			if requestPath == "" && ginCtx.Request.URL != nil {
 				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
 			}
-			baseURL = requestBaseURL(ginCtx.Request)
 		}
 	}
 
@@ -278,9 +276,6 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if requestPath != "" {
 		meta[coreexecutor.RequestPathMetadataKey] = requestPath
-	}
-	if baseURL != "" {
-		meta[coreexecutor.RequestBaseURLMetadataKey] = baseURL
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
@@ -332,44 +327,6 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		}
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
-}
-
-// requestBaseURL reconstructs the origin the client used to reach this proxy,
-// honouring the forwarding headers a reverse proxy sets. It returns an empty
-// string when the host is missing or carries characters that have no business
-// in an authority, since callers embed the result in URLs they hand back.
-func requestBaseURL(req *http.Request) string {
-	if req == nil {
-		return ""
-	}
-	scheme := "http"
-	if req.TLS != nil {
-		scheme = "https"
-	}
-	if forwarded := firstForwardedValue(req.Header.Get("X-Forwarded-Proto")); forwarded != "" {
-		scheme = strings.ToLower(forwarded)
-	}
-	if scheme != "http" && scheme != "https" {
-		return ""
-	}
-	host := firstForwardedValue(req.Header.Get("X-Forwarded-Host"))
-	if host == "" {
-		host = strings.TrimSpace(req.Host)
-	}
-	if host == "" {
-		return ""
-	}
-	if strings.ContainsAny(host, " \t/\\?#@\"'<>") {
-		return ""
-	}
-	return scheme + "://" + host
-}
-
-func firstForwardedValue(value string) string {
-	if idx := strings.IndexByte(value, ','); idx >= 0 {
-		value = value[:idx]
-	}
-	return strings.TrimSpace(value)
 }
 
 // headersFromContext extracts the original HTTP request headers from the gin context

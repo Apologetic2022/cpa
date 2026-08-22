@@ -34,8 +34,6 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeInteractionsKeys(ctx)...)
 	// Claude API Keys
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
-	// Cursor API Keys
-	out = append(out, s.synthesizeCursorKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// OpenAI-compat
@@ -165,66 +163,6 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}
-		out = append(out, a)
-	}
-	return out
-}
-
-// synthesizeCursorKeys creates Auth entries for Cursor user API keys. The key
-// itself is stored in metadata; the cursor executor exchanges it for a
-// short-lived Agent Connect access token on first use.
-func (s *ConfigSynthesizer) synthesizeCursorKeys(ctx *SynthesisContext) []*coreauth.Auth {
-	cfg := ctx.Config
-	now := ctx.Now
-	idGen := ctx.IDGenerator
-
-	out := make([]*coreauth.Auth, 0, len(cfg.CursorKey))
-	for i := range cfg.CursorKey {
-		ck := cfg.CursorKey[i]
-		key := strings.TrimSpace(ck.APIKey)
-		if key == "" {
-			continue
-		}
-		prefix := strings.TrimSpace(ck.Prefix)
-		base := strings.TrimSpace(ck.BaseURL)
-		// Allocate the stable ID before the disabled check so the ID sequence
-		// stays aligned with the management API regardless of disabled flags.
-		id, token := idGen.Next("cursor:apikey", key, base)
-		if ck.Disabled {
-			continue
-		}
-		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:cursor[%s]", token),
-			"api_key": key,
-		}
-		metadata := map[string]any{
-			"type":    "cursor",
-			"api_key": key,
-		}
-		if ck.DisableCooling {
-			metadata["disable_cooling"] = true
-		}
-		if ck.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(ck.Priority)
-		}
-		if base != "" {
-			attrs["base_url"] = base
-			metadata["base_url"] = base
-		}
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "cursor",
-			Label:      "cursor-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out
