@@ -187,6 +187,19 @@ type Session struct {
 	resumeKey       string
 	everOutput      bool
 	snapshotStored  bool
+	// requestKey fingerprints the request messages exactly as the client will
+	// re-send them (its own prefix). Checkpoints stored under it stay findable
+	// even when the client rewrites the reply it got — merging tool calls from
+	// parallel branches, dropping a discarded sample — because the client
+	// never rewrites its own already-sent prefix.
+	requestKey string
+	// pauseCkptStored is the ckptCount already mirrored by a tool-pause store,
+	// so repeated pauses only write when the checkpoint advanced.
+	pauseCkptStored int
+	// pendingUsage holds usage from a turn_ended that arrived while client
+	// tools were still pending (the turn continues after mcp_result). It is
+	// surfaced on the tool_calls segment instead of being dropped.
+	pendingUsage *StreamEvent
 	// pendingResolve releases the conversation-cache pending marker announced
 	// at turn_ended. A follow-up request racing the trailing checkpoint waits
 	// on that marker instead of missing the cache.
@@ -287,13 +300,14 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		}
 		resumeMode := "turn"
 		if entry == nil && modelMismatch == "" {
-			// No checkpoint for the trailing-user-run split. Probe older
-			// turn-end boundaries: a tool-result continuation whose live
-			// session is gone ends in tool messages, and a client may have
-			// rewritten its recent history. Folding the un-checkpointed tail
-			// into the resumed turn keeps the provider cache for everything
-			// before it.
-			if found, fp, folded, ok := lookupTurnBoundaryResume(session.accountKey, selection.ModelID, messages); ok {
+			// No checkpoint for the trailing-user-run split. Probe every
+			// message boundary for the longest stored prefix: a tool-result
+			// continuation whose live session is gone ends in tool messages,
+			// a duplicate continuation re-forks an already-consumed tool
+			// call, and a client may have rewritten its recent history.
+			// Folding the un-checkpointed tail into the resumed turn keeps
+			// the provider cache for everything before it.
+			if found, fp, folded, ok := lookupPrefixResume(session.accountKey, selection.ModelID, messages); ok {
 				entry, fingerprint, userText = found, fp, folded
 				resumeMode = "fold"
 			}
@@ -305,6 +319,11 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 				clientMsg, blobStore, conversationID = cm, bs, cid
 				session.resumed = true
 				session.resumeKey = fingerprint
+				// The resume forks this conversation away from any live
+				// session still parked on it waiting for tool results that
+				// will never come; release that stream instead of leaking it
+				// until the idle sweep.
+				DefaultSessionManager().CloseSupersededConversation(cid)
 				log.Infof("cursor: resuming conversation %s from checkpoint (account=%s model=%s mode=%s)", cid, session.accountKey, selection.ModelID, resumeMode)
 			} else {
 				log.Warnf("cursor: checkpoint found but resume request build failed, replaying full history: %v", errResume)
@@ -382,6 +401,7 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	session.stream = stream
 	session.blobStore = blobStore
 	session.transcript = echoTranscript(messages)
+	session.requestKey = conversationFingerprint(session.transcript)
 	session.tools = append([]ToolDefinition(nil), tools...)
 	session.toolIndex = indexTools(tools)
 	session.pending = map[string]*pendingExec{}
@@ -552,6 +572,14 @@ func (s *Session) readLoop(ctx context.Context) {
 			}
 			if endForTools {
 				s.flushAssistantSegment()
+				// Mirror the mid-turn checkpoint before parking: if this
+				// session is never resumed (client re-forks, gateway
+				// restarts), the next request can still continue the same
+				// upstream conversation instead of re-billing the prefix.
+				s.storePauseSnapshot()
+				if usage := s.takePendingUsage(); usage != nil {
+					s.emit(*usage)
+				}
 				s.beginWaitingTools()
 				s.emit(StreamEvent{Type: "segment_end", Reason: "tool_calls"})
 			}
@@ -703,16 +731,81 @@ func (s *Session) storeConversationSnapshot() {
 	convID := s.ConversationID
 	model := s.Model
 	accountKey := s.accountKey
+	requestKey := s.requestKey
 	s.mu.Unlock()
 	fingerprint := conversationFingerprint(transcript)
-	defaultConversationCache.Store(accountKey, fingerprint, &convEntry{
-		conversationID: convID,
-		state:          state,
-		blobs:          blobs,
-		model:          model,
-	})
+	keys := []string{fingerprint}
+	// Also key the checkpoint by the client's own request prefix: a client
+	// that rewrites the reply (merging parallel tool calls, dropping a
+	// discarded sample) still re-sends its prefix verbatim, and the prefix
+	// probe finds the conversation there.
+	if requestKey != "" && requestKey != fingerprint {
+		keys = append(keys, requestKey)
+	}
+	for _, key := range keys {
+		defaultConversationCache.Store(accountKey, key, &convEntry{
+			conversationID: convID,
+			state:          state,
+			blobs:          blobs,
+			model:          model,
+		})
+	}
 	s.resolvePending()
-	log.Infof("cursor: stored conversation checkpoint conv=%s account=%s turns=%d", convID, accountKey, len(state.GetTurns()))
+	log.Infof("cursor: stored conversation checkpoint conv=%s account=%s turns=%d keys=%d", convID, accountKey, len(state.GetTurns()), len(keys))
+}
+
+// storePauseSnapshot mirrors the latest mid-turn checkpoint into the
+// conversation cache while the session parks for client tool results (and
+// when it dies with tools still pending). The live session remains the
+// preferred continuation path; this store is what rescues the others: a
+// duplicate continuation whose pending call was already consumed, a client
+// whose transcript diverged from the reply it was sent, and a gateway
+// restart. Without it every such request replays the whole history under a
+// fresh upstream conversation and re-bills the prefix (cache_read=0).
+func (s *Session) storePauseSnapshot() {
+	if s.allowImages || !conversationReuseEnabled() {
+		return
+	}
+	s.mu.Lock()
+	if s.accountKey == "" || s.checkpoint == nil || s.snapshotStored || s.turnEnded ||
+		s.ckptCount == s.pauseCkptStored || (s.resumed && !s.everOutput) {
+		s.mu.Unlock()
+		return
+	}
+	s.pauseCkptStored = s.ckptCount
+	state := s.checkpoint
+	blobs := make(map[string][]byte, len(s.blobStore))
+	for k, v := range s.blobStore {
+		blobs[k] = v
+	}
+	convID := s.ConversationID
+	model := s.Model
+	accountKey := s.accountKey
+	requestKey := s.requestKey
+	transcript := s.finalTranscriptLocked()
+	s.mu.Unlock()
+	keys := []string{conversationFingerprint(transcript)}
+	if requestKey != "" && requestKey != keys[0] {
+		keys = append(keys, requestKey)
+	}
+	for _, key := range keys {
+		defaultConversationCache.Store(accountKey, key, &convEntry{
+			conversationID: convID,
+			state:          state,
+			blobs:          blobs,
+			model:          model,
+		})
+	}
+	log.Infof("cursor: stored tool-pause checkpoint conv=%s account=%s keys=%d", convID, accountKey, len(keys))
+}
+
+// takePendingUsage consumes usage captured from a pre-tool turn_ended.
+func (s *Session) takePendingUsage() *StreamEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ev := s.pendingUsage
+	s.pendingUsage = nil
+	return ev
 }
 
 // resolvePending releases the pending-store marker, waking lookups that were
@@ -950,10 +1043,18 @@ func (s *Session) closeWith(reason string) error {
 	}
 	s.closed = true
 	pending := len(s.pending)
+	waiting := s.waitingTools
 	stream := s.stream
 	cancel := s.cancel
 	resolve := s.pendingResolve
 	s.mu.Unlock()
+	// A session dying mid tool round-trip takes its upstream conversation
+	// with it unless the latest checkpoint is mirrored first: the client's
+	// continuation can then fold onto the same conversation instead of
+	// replaying the history uncached.
+	if pending > 0 || waiting {
+		s.storePauseSnapshot()
+	}
 	// A session that ends without storing its snapshot must still release the
 	// pending marker, or a racing lookup would block for the full wait.
 	if resolve != nil {
@@ -990,16 +1091,6 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			s.mu.Unlock()
 			s.emit(StreamEvent{Type: "thinking_delta", Text: u.ThinkingDelta.GetText()})
 		case *agentv1.InteractionUpdate_TurnEnded:
-			// cursor2api: some transports emit turn_ended for the pre-tool
-			// segment before mcp_result is returned. Keep the bidi run open
-			// while client tools are still pending.
-			s.mu.Lock()
-			pendingCount := len(s.pending)
-			waiting := s.waitingTools
-			s.mu.Unlock()
-			if pendingCount > 0 || waiting {
-				return false, nil
-			}
 			ev := StreamEvent{Type: "usage_final"}
 			if u.TurnEnded.InputTokens != nil {
 				ev.InputTokens = *u.TurnEnded.InputTokens
@@ -1016,7 +1107,16 @@ func (s *Session) handleServerMessage(msg *agentv1.AgentServerMessage) (pauseFor
 			if u.TurnEnded.ReasoningTokens != nil {
 				ev.ReasoningTokens = *u.TurnEnded.ReasoningTokens
 			}
+			// cursor2api: some transports emit turn_ended for the pre-tool
+			// segment before mcp_result is returned. Keep the bidi run open
+			// while client tools are still pending, but hold on to the usage
+			// so the tool_calls segment can report it instead of dropping it.
 			s.mu.Lock()
+			if len(s.pending) > 0 || s.waitingTools {
+				s.pendingUsage = &ev
+				s.mu.Unlock()
+				return false, nil
+			}
 			s.turnEnded = true
 			// Announce the upcoming checkpoint store before the reply is
 			// released to the client: a follow-up request that echoes this

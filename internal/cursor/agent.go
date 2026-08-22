@@ -226,29 +226,27 @@ func foldTurnTailText(tail []ChatMessage) string {
 	return b.String()
 }
 
-// maxCheckpointBoundaryProbes bounds how many turn-end boundaries a fallback
-// lookup hashes. The last completed turn sits near the end of the request, so
-// a handful of probes is enough.
-const maxCheckpointBoundaryProbes = 8
+// foldContinueNudge is the user text a resume carries when the request adds
+// nothing beyond what the checkpoint already covers — a client re-forking the
+// same continuation after discarding the reply it got. The model just picks
+// the turn back up.
+const foldContinueNudge = "Continue."
 
-// lookupTurnBoundaryResume probes older turn-end boundaries of a request for
-// a stored checkpoint when the trailing-user-run lookup found none. It covers
-// the requests that split cannot: a tool-result continuation whose live
-// session is gone (the trailing messages are tool results, not a user run),
-// and a client that rewrote its recent history. Checkpoints are stored at
-// turn end, when the transcript closes with an assistant text reply, so only
-// those positions are probed. On a hit the entry is returned together with
-// the folded tail that becomes the resumed turn's user message.
-func lookupTurnBoundaryResume(accountKey, wireModelID string, messages []ChatMessage) (*convEntry, string, string, bool) {
-	probes := 0
-	for i := len(messages) - 1; i >= 1 && probes < maxCheckpointBoundaryProbes; i-- {
-		prev := &messages[i-1]
-		if prev.Role != "assistant" || strings.TrimSpace(prev.Content) == "" || len(prev.ToolCalls) > 0 {
-			continue
-		}
-		probes++
-		fingerprint := conversationFingerprint(messages[:i])
-		entry, ok := defaultConversationCache.LookupNoWait(accountKey, fingerprint)
+// lookupPrefixResume probes every message boundary of a request, longest
+// prefix first, for a stored checkpoint covering exactly that prefix. It
+// rescues the requests the trailing-user-run split cannot: tool-result
+// continuations whose live session is gone, duplicate continuations whose
+// pending tool call was already consumed, and clients that rewrite or extend
+// the reply with tool calls the gateway never issued (agent front-ends
+// running several model branches merge them into one transcript). Checkpoints
+// are stored under the final transcript, the client's request prefix, and
+// mid-turn tool-pause boundaries, so any of those positions can hit. On a hit
+// the un-checkpointed tail is folded into the resumed turn's user message.
+func lookupPrefixResume(accountKey, wireModelID string, messages []ChatMessage) (*convEntry, string, string, bool) {
+	echo := echoTranscript(messages)
+	prefixes := conversationPrefixFingerprints(echo)
+	for i := len(echo); i >= 1; i-- {
+		entry, ok := defaultConversationCache.LookupNoWait(accountKey, prefixes[i])
 		if !ok {
 			continue
 		}
@@ -257,11 +255,11 @@ func lookupTurnBoundaryResume(accountKey, wireModelID string, messages []ChatMes
 			// boundary would be, too.
 			return nil, "", "", false
 		}
-		text := foldTurnTailText(messages[i:])
+		text := foldTurnTailText(echo[i:])
 		if strings.TrimSpace(text) == "" {
-			return nil, "", "", false
+			text = foldContinueNudge
 		}
-		return entry, fingerprint, text, true
+		return entry, prefixes[i], text, true
 	}
 	return nil, "", "", false
 }

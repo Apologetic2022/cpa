@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,8 +36,11 @@ const (
 	// that expires while the user is reading forces the next turn to replay
 	// the whole history under a fresh upstream conversation, which re-bills
 	// the entire prefix.
-	convCacheTTL     = 2 * time.Hour
-	convCacheMaxSize = 512
+	convCacheTTL = 2 * time.Hour
+	// convCacheMaxSize allows for the multiple keys one turn now stores (the
+	// final transcript, the client's request prefix, and mid-turn tool-pause
+	// boundaries).
+	convCacheMaxSize = 2048
 
 	// convPendingWait bounds how long a lookup waits for a checkpoint that is
 	// still in flight. The server's final checkpoint trails turn_ended by up
@@ -448,36 +452,58 @@ func accountKeyFromCredentials(creds AccountCredentials) string {
 func conversationFingerprint(messages []ChatMessage) string {
 	h := sha256.New()
 	for i := range messages {
-		msg := &messages[i]
-		role := strings.TrimSpace(msg.Role)
-		content := strings.TrimSpace(msg.Content)
-		if role == "" {
-			continue
-		}
-		if content == "" && len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.ToolCallID) == "" {
-			continue
-		}
-		h.Write([]byte{0x1e})
-		h.Write([]byte(role))
-		h.Write([]byte{0x1f})
-		h.Write([]byte(content))
-		h.Write([]byte{0x1f})
-		if role == "tool" {
-			h.Write([]byte(NormalizeToolCallID(msg.ToolCallID)))
-			h.Write([]byte{0x1f})
-		}
-		for _, tc := range msg.ToolCalls {
-			h.Write([]byte(NormalizeToolCallID(tc.ID)))
-			h.Write([]byte{0x1f})
-			h.Write([]byte(strings.TrimSpace(tc.Name)))
-			h.Write([]byte{0x1f})
-			if len(tc.Arguments) > 0 {
-				if b, err := json.Marshal(tc.Arguments); err == nil {
-					h.Write(b)
-				}
-			}
-			h.Write([]byte{0x1f})
-		}
+		fingerprintMessage(h, &messages[i])
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// conversationPrefixFingerprints returns the fingerprint of every
+// message-boundary prefix: element i equals
+// conversationFingerprint(messages[:i]). Computed in one pass (Sum does not
+// disturb the running hash state), it lets a lookup probe all boundaries of a
+// request for the longest prefix a stored checkpoint covers.
+func conversationPrefixFingerprints(messages []ChatMessage) []string {
+	h := sha256.New()
+	out := make([]string, len(messages)+1)
+	out[0] = hex.EncodeToString(h.Sum(nil))
+	for i := range messages {
+		fingerprintMessage(h, &messages[i])
+		out[i+1] = hex.EncodeToString(h.Sum(nil))
+	}
+	return out
+}
+
+// fingerprintMessage feeds one transcript message into a fingerprint hash.
+// Messages with no role or no echoable payload contribute nothing, so a
+// client dropping them does not change the fingerprint.
+func fingerprintMessage(h hash.Hash, msg *ChatMessage) {
+	role := strings.TrimSpace(msg.Role)
+	content := strings.TrimSpace(msg.Content)
+	if role == "" {
+		return
+	}
+	if content == "" && len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.ToolCallID) == "" {
+		return
+	}
+	h.Write([]byte{0x1e})
+	h.Write([]byte(role))
+	h.Write([]byte{0x1f})
+	h.Write([]byte(content))
+	h.Write([]byte{0x1f})
+	if role == "tool" {
+		h.Write([]byte(NormalizeToolCallID(msg.ToolCallID)))
+		h.Write([]byte{0x1f})
+	}
+	for _, tc := range msg.ToolCalls {
+		h.Write([]byte(NormalizeToolCallID(tc.ID)))
+		h.Write([]byte{0x1f})
+		h.Write([]byte(strings.TrimSpace(tc.Name)))
+		h.Write([]byte{0x1f})
+		if len(tc.Arguments) > 0 {
+			if b, err := json.Marshal(tc.Arguments); err == nil {
+				h.Write(b)
+			}
+		}
+		h.Write([]byte{0x1f})
+	}
 }

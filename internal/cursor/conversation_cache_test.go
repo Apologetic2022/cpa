@@ -63,7 +63,7 @@ func TestLookupTurnBoundaryResumeFoldsToolTail(t *testing.T) {
 		ChatMessage{Role: "tool", Name: "Shell", ToolCallID: "c1", Content: "a.txt full output"},
 		ChatMessage{Role: "user", Content: replayNoteMarker + " Their results are below.\n<tool_result>a.txt</tool_result>"},
 	)
-	entry, gotFp, folded, ok := lookupTurnBoundaryResume("acct-boundary", "claude-sonnet-5", continuation)
+	entry, gotFp, folded, ok := lookupPrefixResume("acct-boundary", "claude-sonnet-5", continuation)
 	if !ok || entry == nil || entry.conversationID != "conv-b" || gotFp != fp {
 		t.Fatalf("expected boundary resume hit, got ok=%v entry=%+v", ok, entry)
 	}
@@ -77,9 +77,131 @@ func TestLookupTurnBoundaryResumeFoldsToolTail(t *testing.T) {
 	}
 
 	// A checkpoint pinned to another model cannot be continued.
-	if _, _, _, ok = lookupTurnBoundaryResume("acct-boundary", "grok-4.6", continuation); ok {
+	if _, _, _, ok = lookupPrefixResume("acct-boundary", "grok-4.6", continuation); ok {
 		t.Fatalf("boundary resume must refuse a model mismatch")
 	}
+}
+
+func TestConversationPrefixFingerprintsMatchDirectHashes(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "question"},
+		{Role: ""}, // skipped: no role
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "terminal", Arguments: map[string]any{"cmd": "ls"}}}},
+		{Role: "tool", ToolCallID: "c1", Content: "out"},
+	}
+	prefixes := conversationPrefixFingerprints(messages)
+	if len(prefixes) != len(messages)+1 {
+		t.Fatalf("expected %d prefixes, got %d", len(messages)+1, len(prefixes))
+	}
+	for i := 0; i <= len(messages); i++ {
+		if prefixes[i] != conversationFingerprint(messages[:i]) {
+			t.Fatalf("prefix %d does not match conversationFingerprint of the same slice", i)
+		}
+	}
+}
+
+func TestLookupPrefixResumeSurvivesClientDivergence(t *testing.T) {
+	t.Setenv("CPA_CURSOR_CONV_CACHE_DIR", t.TempDir())
+	// The request prefix a tool-pause store keyed the checkpoint under:
+	// exactly the message list the client sent, ending in a tool result.
+	requestPrefix := []ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "set up my machines"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "toolu_A", Name: "terminal", Arguments: map[string]any{"command": "uname -a"}}}},
+		{Role: "tool", ToolCallID: "toolu_A", Content: "Darwin"},
+	}
+	fp := conversationFingerprint(requestPrefix)
+	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
+	defaultConversationCache.Store("acct-div", fp, &convEntry{conversationID: "conv-div", state: state, model: "claude-opus-5"})
+	defer defaultConversationCache.Invalidate("acct-div", fp)
+
+	// The client re-sends its prefix verbatim but the appended assistant
+	// message merges a tool call from another branch (an id this gateway
+	// never issued) with one of ours.
+	diverged := append(append([]ChatMessage(nil), requestPrefix...),
+		ChatMessage{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "tooluse_foreign", Name: "todo", Arguments: map[string]any{"todos": "x"}},
+			{ID: "toolu_B", Name: "terminal", Arguments: map[string]any{"command": "ls"}},
+		}},
+		ChatMessage{Role: "tool", ToolCallID: "tooluse_foreign", Content: "todo stored"},
+		ChatMessage{Role: "tool", ToolCallID: "toolu_B", Content: "a.txt"},
+	)
+	entry, gotFp, folded, ok := lookupPrefixResume("acct-div", "claude-opus-5", diverged)
+	if !ok || entry == nil || entry.conversationID != "conv-div" || gotFp != fp {
+		t.Fatalf("expected prefix resume hit, got ok=%v entry=%+v", ok, entry)
+	}
+	for _, want := range []string{"tooluse_foreign", "todo stored", "toolu_B", "a.txt"} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("folded tail must restate %q, got %q", want, folded)
+		}
+	}
+
+	// An exact duplicate of the covered prefix (a client re-forking the same
+	// continuation) resumes with the nudge instead of missing.
+	entry, _, folded, ok = lookupPrefixResume("acct-div", "claude-opus-5", requestPrefix)
+	if !ok || entry == nil || entry.conversationID != "conv-div" {
+		t.Fatalf("expected duplicate continuation to resume, got ok=%v", ok)
+	}
+	if folded != foldContinueNudge {
+		t.Fatalf("duplicate continuation must carry the continue nudge, got %q", folded)
+	}
+}
+
+func TestStorePauseSnapshotKeysRequestPrefixAndTranscript(t *testing.T) {
+	t.Setenv("CPA_CURSOR_CONV_REUSE", "1")
+	t.Setenv("CPA_CURSOR_CONV_CACHE_DIR", t.TempDir())
+	request := []ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "do the thing"},
+	}
+	session := &Session{
+		ID:             "sess-pause",
+		ConversationID: "conv-pause",
+		Model:          "claude-opus-5",
+		accountKey:     "acct-pause",
+		transcript:     append([]ChatMessage(nil), request...),
+		requestKey:     conversationFingerprint(request),
+		checkpoint:     &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}},
+		ckptCount:      1,
+		blobStore:      map[string][]byte{"k": []byte("v")},
+	}
+	session.segCalls = []ToolCall{{ID: "toolu_A", Name: "terminal", Arguments: map[string]any{"command": "ls"}}}
+	session.storePauseSnapshot()
+
+	// Findable under the client's request prefix…
+	entry, ok := defaultConversationCache.Lookup("acct-pause", session.requestKey)
+	if !ok || entry.conversationID != "conv-pause" {
+		t.Fatalf("pause snapshot must be stored under the request prefix, ok=%v", ok)
+	}
+	// …and under the transcript including the emitted tool call.
+	withCall := append(append([]ChatMessage(nil), request...),
+		ChatMessage{Role: "assistant", ToolCalls: []ToolCall{{ID: "toolu_A", Name: "terminal", Arguments: map[string]any{"command": "ls"}}}})
+	transcriptFp := conversationFingerprint(withCall)
+	if _, ok = defaultConversationCache.Lookup("acct-pause", transcriptFp); !ok {
+		t.Fatalf("pause snapshot must be stored under the paused transcript")
+	}
+
+	// A second pause without a newer checkpoint is a no-op.
+	defaultConversationCache.Invalidate("acct-pause", session.requestKey)
+	session.storePauseSnapshot()
+	if _, ok = defaultConversationCache.Lookup("acct-pause", session.requestKey); ok {
+		t.Fatalf("pause snapshot must not rewrite without a newer checkpoint")
+	}
+	// A newer checkpoint stores again; a finished turn does not.
+	session.ckptCount++
+	session.turnEnded = true
+	session.storePauseSnapshot()
+	if _, ok = defaultConversationCache.Lookup("acct-pause", session.requestKey); ok {
+		t.Fatalf("pause snapshot must not run after turn end")
+	}
+	session.turnEnded = false
+	session.storePauseSnapshot()
+	if _, ok = defaultConversationCache.Lookup("acct-pause", session.requestKey); !ok {
+		t.Fatalf("a newer checkpoint must be mirrored again")
+	}
+	defaultConversationCache.Invalidate("acct-pause", session.requestKey)
+	defaultConversationCache.Invalidate("acct-pause", transcriptFp)
 }
 
 func TestEchoTranscriptStripsReplayNote(t *testing.T) {

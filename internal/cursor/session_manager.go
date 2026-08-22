@@ -3,6 +3,7 @@ package cursor
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,6 +116,36 @@ func (m *SessionManager) ResolveForToolResults(results []ToolResult) (*Session, 
 		owner.touch()
 	}
 	return owner, nil
+}
+
+// CloseSupersededConversation closes live sessions parked on conversationID
+// waiting for client tool results. A checkpoint resume is about to fork that
+// conversation onto a new run, which means the client abandoned the branch
+// the parked session is holding open; without this the leaked stream idles
+// until the sweep while its pending tool calls shadow the conversation.
+// Sessions that are actively streaming are left alone.
+func (m *SessionManager) CloseSupersededConversation(conversationID string) {
+	if m == nil || strings.TrimSpace(conversationID) == "" {
+		return
+	}
+	m.mu.Lock()
+	candidates := make([]*Session, 0, 1)
+	for _, session := range m.sessions {
+		if session.ConversationID == conversationID {
+			candidates = append(candidates, session)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range candidates {
+		session.mu.Lock()
+		parked := session.waitingTools && !session.closed
+		session.mu.Unlock()
+		if !parked {
+			continue
+		}
+		log.Infof("cursor: closing superseded tool-wait session %s conv=%s", session.ID, conversationID)
+		_ = session.closeWith("superseded_by_resume")
+	}
 }
 
 // Remove drops a session and all of its pending indexes.
