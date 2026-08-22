@@ -525,23 +525,23 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		}
 
 		var claudeModel map[string]any
-		var rewrittenModel map[string]any
+		var gptModel map[string]any
 		for _, m := range resp.Data {
 			id, _ := m["id"].(string)
 			switch id {
 			case "claude-sonnet-4-6":
 				claudeModel = m
-			case "claude-fable-5-dd-o4-tpg":
-				rewrittenModel = m
-			case "gpt-4o", "claude-gpt-4o":
-				t.Fatalf("expected non-claude model id to be rewritten as claude-fable-5-dd-<reversed>, got %q", id)
+			case "gpt-4o":
+				gptModel = m
+			case "claude-gpt-4o", "claude-fable-5-dd-o4-tpg":
+				t.Fatalf("did not expect obfuscated alias in model listing, got %q", id)
 			}
 		}
 		if claudeModel == nil {
 			t.Fatalf("expected claude-sonnet-4-6 in response, got %s", rr.Body.String())
 		}
-		if rewrittenModel == nil {
-			t.Fatalf("expected claude-fable-5-dd-o4-tpg in response, got %s", rr.Body.String())
+		if gptModel == nil {
+			t.Fatalf("expected raw gpt-4o in response, got %s", rr.Body.String())
 		}
 		for _, field := range []string{"max_input_tokens", "max_tokens", "display_name"} {
 			if _, ok := claudeModel[field]; !ok {
@@ -897,11 +897,11 @@ func TestFormatHomeClaudeModelIncludesAnthropicSchemaFields(t *testing.T) {
 		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
 	}
 
-	prefixed := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
-	if got := prefixed["id"]; got != "claude-fable-5-dd-o4-tpg" {
-		t.Fatalf("id = %v, want claude-fable-5-dd-o4-tpg", got)
+	nonClaude := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
+	if got := nonClaude["id"]; got != "gpt-4o" {
+		t.Fatalf("id = %v, want gpt-4o", got)
 	}
-	if got := prefixed["display_name"]; got != "GPT-4o" {
+	if got := nonClaude["display_name"]; got != "GPT-4o" {
 		t.Fatalf("display_name = %v, want GPT-4o", got)
 	}
 	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
