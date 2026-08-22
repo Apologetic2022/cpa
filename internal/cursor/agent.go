@@ -144,6 +144,33 @@ func historyHasAssistant(messages []ChatMessage) bool {
 	return false
 }
 
+// splitTrailingUserRun splits a request into the transcript prefix a stored
+// checkpoint could cover (everything up to the last non-user message) and the
+// trailing run of user messages that make up the new turn. Checkpoints are
+// stored at turn end, when the transcript closes with the assistant reply, so
+// every user message after that reply belongs to the incoming turn — clients
+// like the Cursor CLI send several per turn (reminders, todo lists, then the
+// actual question).
+func splitTrailingUserRun(messages []ChatMessage) (prefix, turn []ChatMessage) {
+	i := len(messages)
+	for i > 0 && messages[i-1].Role == "user" {
+		i--
+	}
+	return messages[:i], messages[i:]
+}
+
+// joinedUserText renders a run of user messages as the single user message a
+// resumed turn sends upstream.
+func joinedUserText(turn []ChatMessage) string {
+	parts := make([]string, 0, len(turn))
+	for i := range turn {
+		if content := strings.TrimSpace(turn[i].Content); content != "" {
+			parts = append(parts, turn[i].Content)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // resolveRunModelDetails applies catalog overrides to a model selection and
 // renders the ModelDetails proto the Agent run needs.
 func resolveRunModelDetails(selection *ModelSelection) *agentv1.ModelDetails {

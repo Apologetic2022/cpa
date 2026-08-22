@@ -238,12 +238,20 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	var conversationID string
 	session.accountKey = accountKeyFromCredentials(creds)
 	if !session.allowImages && conversationReuseEnabled() && session.accountKey != "" {
-		if history, activeUser, errSplit := splitActiveUser(messages); errSplit == nil {
-			fingerprint := conversationFingerprint(history)
+		// The stored fingerprint always ends at the previous assistant reply,
+		// so the lookup must treat the whole trailing run of user messages as
+		// the new turn: agent front-ends (Cursor CLI style) prepend reminders
+		// and todo lists to the actual question as separate user messages,
+		// and hashing those into the transcript made every follow-up miss.
+		if prefix, turn := splitTrailingUserRun(messages); len(prefix) > 0 && len(turn) > 0 {
+			userText := joinedUserText(turn)
+			fingerprint := conversationFingerprint(prefix)
 			entry, ok := defaultConversationCache.Lookup(session.accountKey, fingerprint)
 			switch {
+			case userText == "":
+				// Nothing to send as the new turn; fall through to a full build.
 			case ok && entry.model == selection.ModelID:
-				cm, bs, cid, errResume := buildResumeRunRequest(model, entry, activeUser.Content, tools)
+				cm, bs, cid, errResume := buildResumeRunRequest(model, entry, userText, tools)
 				if errResume == nil {
 					clientMsg, blobStore, conversationID = cm, bs, cid
 					session.resumed = true
@@ -257,11 +265,11 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 				// conversation is pinned to another model, so it cannot be
 				// continued. Info because it explains a full re-bill.
 				log.Infof("cursor: checkpoint model mismatch, replaying full history (account=%s have=%s want=%s)", session.accountKey, entry.model, selection.ModelID)
-			case historyHasAssistant(history):
+			case historyHasAssistant(prefix):
 				// A follow-up turn with no checkpoint replays the entire
 				// prefix uncached; log it so cache misses are visible in
 				// production without debug logging.
-				log.Infof("cursor: no checkpoint for follow-up, replaying full history (account=%s model=%s history=%d)", session.accountKey, selection.ModelID, len(history))
+				log.Infof("cursor: no checkpoint for follow-up, replaying full history (account=%s model=%s history=%d)", session.accountKey, selection.ModelID, len(prefix))
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,54 @@ func TestLookupWaitsForPendingStore(t *testing.T) {
 	}
 	if waited := time.Since(start); waited > 500*time.Millisecond {
 		t.Fatalf("plain miss must not wait (waited %s)", waited)
+	}
+}
+
+func TestTrailingUserRunMatchesStoredFingerprint(t *testing.T) {
+	// The transcript stored at turn end closes with the assistant reply.
+	stored := []ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "<todo_list>old</todo_list>"},
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+	}
+	// The follow-up prepends reminders and a todo list to the actual
+	// question as separate user messages (Cursor CLI style).
+	followUp := append(append([]ChatMessage(nil), stored...),
+		ChatMessage{Role: "user", Content: "<system_reminder>mode changed</system_reminder>"},
+		ChatMessage{Role: "user", Content: "<todo_list>new</todo_list>"},
+		ChatMessage{Role: "user", Content: "second question"},
+	)
+	prefix, turn := splitTrailingUserRun(followUp)
+	if len(turn) != 3 {
+		t.Fatalf("expected the 3 trailing user messages to form the new turn, got %d", len(turn))
+	}
+	if conversationFingerprint(prefix) != conversationFingerprint(stored) {
+		t.Fatalf("lookup prefix must reproduce the stored fingerprint")
+	}
+	joined := joinedUserText(turn)
+	for _, want := range []string{"mode changed", "<todo_list>new</todo_list>", "second question"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("joined turn text must carry %q, got %q", want, joined)
+		}
+	}
+
+	// A single trailing user message behaves exactly like the old split.
+	single := append(append([]ChatMessage(nil), stored...),
+		ChatMessage{Role: "user", Content: "second question"})
+	prefix, turn = splitTrailingUserRun(single)
+	if len(turn) != 1 || conversationFingerprint(prefix) != conversationFingerprint(stored) {
+		t.Fatalf("single-user turn must keep matching, turn=%d", len(turn))
+	}
+
+	// A tool-result continuation is not a user run and must not match.
+	toolCont := append(append([]ChatMessage(nil), stored...),
+		ChatMessage{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "Shell"}}},
+		ChatMessage{Role: "tool", ToolCallID: "c1", Content: "out"},
+	)
+	prefix, turn = splitTrailingUserRun(toolCont)
+	if len(turn) != 0 || len(prefix) != len(toolCont) {
+		t.Fatalf("trailing tool messages must stay in the prefix")
 	}
 }
 
