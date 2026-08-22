@@ -16,8 +16,35 @@ import (
 	"github.com/google/uuid"
 	agentv1 "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/agent/v1"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
+
+// splitAgentServerRecords splits an envelope payload into one chunk per
+// top-level field record. AgentServerMessage is a bare oneof, but upstream
+// sometimes packs several records into a single frame (the first text_delta
+// piggybacks on the server_metrics frame). A plain proto.Unmarshal keeps only
+// the last oneof record on the wire, silently dropping the earlier ones —
+// which lost the first streamed token of every reply. Returns nil when the
+// payload is not well-formed wire format so the caller can fall back to
+// decoding the payload as-is.
+func splitAgentServerRecords(payload []byte) [][]byte {
+	var records [][]byte
+	rest := payload
+	for len(rest) > 0 {
+		num, typ, n := protowire.ConsumeTag(rest)
+		if n < 0 {
+			return nil
+		}
+		m := protowire.ConsumeFieldValue(num, typ, rest[n:])
+		if m < 0 {
+			return nil
+		}
+		records = append(records, rest[:n+m])
+		rest = rest[n+m:]
+	}
+	return records
+}
 
 // MCPProviderIdentifier is the provider_identifier advertised for OpenAI tools.
 const MCPProviderIdentifier = "cliproxyapi"
@@ -502,19 +529,25 @@ func (s *Session) readLoop(ctx context.Context) {
 					_ = s.closeWith("upstream_end_stream")
 					return
 				}
-				serverMsg := &agentv1.AgentServerMessage{}
-				if err := proto.Unmarshal(env.Payload, serverMsg); err != nil {
-					s.fail(fmt.Errorf("cursor decode server message: %w", err))
-					return
+				chunks := splitAgentServerRecords(env.Payload)
+				if len(chunks) == 0 {
+					chunks = [][]byte{env.Payload}
 				}
-				debugDumpFrame(env, serverMsg)
-				pause, err := s.handleServerMessage(serverMsg)
-				if err != nil {
-					s.fail(err)
-					return
-				}
-				if pause {
-					endForTools = true
+				for _, chunk := range chunks {
+					serverMsg := &agentv1.AgentServerMessage{}
+					if err := proto.Unmarshal(chunk, serverMsg); err != nil {
+						s.fail(fmt.Errorf("cursor decode server message: %w", err))
+						return
+					}
+					debugDumpFrame(env, serverMsg)
+					pause, err := s.handleServerMessage(serverMsg)
+					if err != nil {
+						s.fail(err)
+						return
+					}
+					if pause {
+						endForTools = true
+					}
 				}
 			}
 			if endForTools {
