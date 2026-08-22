@@ -485,6 +485,7 @@ func (s *Session) readLoop(ctx context.Context) {
 			endForTools := false
 			for _, env := range envelopes {
 				if env.EndStream() {
+					debugDumpFrame(env, nil)
 					if len(env.Payload) > 0 {
 						var trailer struct {
 							Error json.RawMessage `json:"error"`
@@ -506,6 +507,7 @@ func (s *Session) readLoop(ctx context.Context) {
 					s.fail(fmt.Errorf("cursor decode server message: %w", err))
 					return
 				}
+				debugDumpFrame(env, serverMsg)
 				pause, err := s.handleServerMessage(serverMsg)
 				if err != nil {
 					s.fail(err)
