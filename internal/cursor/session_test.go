@@ -182,6 +182,57 @@ func TestBuildRunRequestFoldsToolHistoryForClaude(t *testing.T) {
 	}
 }
 
+func TestBuildRunRequestNamespacesToolNamesForClaude(t *testing.T) {
+	// Anthropic rejects duplicate tool names, and Cursor always registers its
+	// built-in agent tools (Shell, Read, ...). Client tools on claude models
+	// are therefore namespaced on the wire and mapped back on the way out.
+	tools := []ToolDefinition{
+		{Name: "Shell", Description: "run a command",
+			Parameters: map[string]any{"type": "object"}},
+	}
+	msg, _, _, err := buildRunRequest("claude-sonnet-5", []ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, tools, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs := msg.GetRunRequest().GetMcpTools().GetMcpTools()
+	if len(defs) != 1 || defs[0].GetName() != "mcp_Shell" || defs[0].GetToolName() != "mcp_Shell" {
+		t.Fatalf("claude tools must be namespaced on the wire, got %+v", defs)
+	}
+
+	msg, _, _, err = buildRunRequest("grok-4.6", []ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, tools, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs = msg.GetRunRequest().GetMcpTools().GetMcpTools()
+	if len(defs) != 1 || defs[0].GetName() != "Shell" {
+		t.Fatalf("non-claude tools keep their names, got %+v", defs)
+	}
+}
+
+func TestLookupToolResolvesWireNamespacedName(t *testing.T) {
+	tools := []ToolDefinition{{Name: "Shell", Description: "run"}}
+	session := &Session{
+		tools:             tools,
+		toolIndex:         indexTools(tools),
+		renameToolsOnWire: true,
+	}
+	def := session.lookupTool("mcp_Shell", MCPProviderIdentifier)
+	if def == nil || def.Name != "Shell" {
+		t.Fatalf("wire-namespaced tool name must resolve to the client definition, got %+v", def)
+	}
+	if def = session.lookupTool("Shell", MCPProviderIdentifier); def == nil {
+		t.Fatalf("plain name must keep resolving")
+	}
+	names := session.availableToolNames()
+	if len(names) != 1 || names[0] != "mcp_Shell" {
+		t.Fatalf("available tools must use wire names, got %v", names)
+	}
+}
+
 func TestCookieJarRemembersSetCookie(t *testing.T) {
 	jar := &CookieJar{byHost: map[string]map[string]string{}}
 	hdr := make(http.Header)

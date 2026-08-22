@@ -213,7 +213,7 @@ func buildResumeRunRequest(model string, entry *convEntry, userText string, tool
 			},
 		},
 	}
-	if defs := buildMcpToolDefinitions(tools); len(defs) > 0 {
+	if defs := buildMcpToolDefinitions(tools, claudeWireModel(selection.ModelID)); len(defs) > 0 {
 		run.McpTools = &agentv1.McpTools{McpTools: defs}
 	}
 	client := &agentv1.AgentClientMessage{
@@ -222,16 +222,23 @@ func buildResumeRunRequest(model string, entry *convEntry, userText string, tool
 	return client, blobStore, conversationID, nil
 }
 
-// replayToolsAsText reports whether a replayed history must fold its tool
-// calls and tool results into plain text for this model. Cursor serves every
-// claude model as a thinking variant, and its Anthropic upstream rejects a
-// replayed history that carries structured tool-call/tool-result parts
-// without their original signed thinking blocks: the run dies immediately
-// with ERROR_PROVIDER_ERROR (provider 400, not retryable), so a claude
-// conversation could never be rebuilt once its checkpoint or live session was
-// gone. Text-folded history sidesteps the constraint; grok / composer / gpt
-// accept the structured form and keep it.
-func replayToolsAsText(wireModelID string) bool {
+// claudeWireModel reports whether a wire model id is served by Cursor's
+// Anthropic upstream. That upstream is strict about the request Cursor
+// constructs from an Agent run, so two claude-only accommodations hang off
+// this predicate:
+//
+//  1. Client tool names are namespaced on the wire (see mcpToolWirePrefix):
+//     Cursor registers its built-in agent tools (Shell, Read, Grep, ...)
+//     alongside the MCP tools, and Anthropic rejects the duplicate names
+//     with ERROR_PROVIDER_ERROR / provider 400 (not retryable). Claude Code
+//     style clients use exactly those names, so without the rename every
+//     tool-bearing claude run died before producing a single token. Grok /
+//     composer upstreams tolerate the duplicates, and renaming there would
+//     needlessly change what working traffic sees.
+//  2. Replayed histories fold tool calls and results into plain text
+//     instead of structured tool-call/tool-result parts, which the upstream
+//     cannot always restore for thinking models.
+func claudeWireModel(wireModelID string) bool {
 	return strings.Contains(strings.ToLower(wireModelID), "claude")
 }
 
@@ -270,7 +277,8 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 
 	// Track tool names so tool-result parts can include toolName (cursor2api).
 	toolNames := map[string]string{}
-	foldTools := replayToolsAsText(selection.ModelID)
+	claudeUpstream := claudeWireModel(selection.ModelID)
+	foldTools := claudeUpstream
 	rootIDs := [][]byte{systemBlob}
 	for _, msg := range history {
 		switch msg.Role {
@@ -406,7 +414,7 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			},
 		},
 	}
-	if defs := buildMcpToolDefinitions(tools); len(defs) > 0 {
+	if defs := buildMcpToolDefinitions(tools, claudeUpstream); len(defs) > 0 {
 		run.McpTools = &agentv1.McpTools{McpTools: defs}
 	}
 	client := &agentv1.AgentClientMessage{

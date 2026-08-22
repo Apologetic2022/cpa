@@ -134,6 +134,12 @@ type Session struct {
 	// turn it on.
 	allowImages bool
 
+	// renameToolsOnWire mirrors the tool-name namespacing applied when the
+	// run was built (see claudeWireModel): incoming tool calls resolve the
+	// prefixed name back to the client's definition, and tool listings shown
+	// to the model use the wire names.
+	renameToolsOnWire bool
+
 	// Conversation continuation state (see conversation_cache.go). transcript
 	// mirrors the conversation exactly as the client will echo it back on its
 	// next request: the request messages, then each assistant segment, tool
@@ -316,6 +322,7 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	session.ID = uuid.NewString()
 	session.ConversationID = conversationID
 	session.Model = selection.ModelID
+	session.renameToolsOnWire = claudeWireModel(selection.ModelID)
 	session.stream = stream
 	session.blobStore = blobStore
 	session.transcript = append([]ChatMessage(nil), messages...)
@@ -1391,6 +1398,13 @@ func (s *Session) lookupTool(name, provider string) *ToolDefinition {
 	}
 	def := s.toolIndex[name]
 	if def == nil {
+		// Tools registered under a wire-namespaced name (claude upstream)
+		// come back with that name; resolve them to the client's definition.
+		if trimmed, ok := strings.CutPrefix(name, mcpToolWirePrefix); ok {
+			def = s.toolIndex[trimmed]
+		}
+	}
+	if def == nil {
 		return nil
 	}
 	if provider == "" || provider == MCPProviderIdentifier {
@@ -1399,12 +1413,19 @@ func (s *Session) lookupTool(name, provider string) *ToolDefinition {
 	return nil
 }
 
+// availableToolNames lists tool names the way the model knows them: it feeds
+// the ToolNotFound reply, so it must match what was registered on the wire.
 func (s *Session) availableToolNames() []string {
 	names := make([]string, 0, len(s.tools))
 	for _, t := range s.tools {
-		if t.Name != "" {
-			names = append(names, t.Name)
+		if t.Name == "" {
+			continue
 		}
+		name := t.Name
+		if s.renameToolsOnWire {
+			name = mcpToolWirePrefix + name
+		}
+		names = append(names, name)
 	}
 	return names
 }
@@ -1412,7 +1433,7 @@ func (s *Session) availableToolNames() []string {
 func (s *Session) requestContext() *agentv1.RequestContext {
 	ctx := headlessRequestContext()
 	if len(s.tools) > 0 {
-		ctx.Tools = buildMcpToolDefinitions(s.tools)
+		ctx.Tools = buildMcpToolDefinitions(s.tools, s.renameToolsOnWire)
 	}
 	return ctx
 }
@@ -1441,12 +1462,21 @@ func rejectUnsupportedExec(stream *BidiStream, req *agentv1.ExecServerMessage) e
 	return sendExecStreamClose(stream, req.Id)
 }
 
-func buildMcpToolDefinitions(tools []ToolDefinition) []*agentv1.McpToolDefinition {
+// mcpToolWirePrefix namespaces client tool names on the wire when the model's
+// upstream rejects duplicates of Cursor's built-in agent tool names (see
+// claudeWireModel). The prefix is stripped again when the model calls the
+// tool, so clients always see their own names.
+const mcpToolWirePrefix = "mcp_"
+
+func buildMcpToolDefinitions(tools []ToolDefinition, renameOnWire bool) []*agentv1.McpToolDefinition {
 	out := make([]*agentv1.McpToolDefinition, 0, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
 		if name == "" {
 			continue
+		}
+		if renameOnWire {
+			name = mcpToolWirePrefix + name
 		}
 		schema := tool.Parameters
 		if schema == nil {
