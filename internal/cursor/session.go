@@ -243,34 +243,55 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		// the new turn: agent front-ends (Cursor CLI style) prepend reminders
 		// and todo lists to the actual question as separate user messages,
 		// and hashing those into the transcript made every follow-up miss.
-		if prefix, turn := splitTrailingUserRun(messages); len(prefix) > 0 && len(turn) > 0 {
-			userText := joinedUserText(turn)
-			fingerprint := conversationFingerprint(prefix)
-			entry, ok := defaultConversationCache.Lookup(session.accountKey, fingerprint)
-			switch {
-			case userText == "":
-				// Nothing to send as the new turn; fall through to a full build.
-			case ok && entry.model == selection.ModelID:
-				cm, bs, cid, errResume := buildResumeRunRequest(model, entry, userText, tools)
-				if errResume == nil {
-					clientMsg, blobStore, conversationID = cm, bs, cid
-					session.resumed = true
-					session.resumeKey = fingerprint
-					log.Infof("cursor: resuming conversation %s from checkpoint (account=%s model=%s)", cid, session.accountKey, selection.ModelID)
+		prefix, turn := splitTrailingUserRun(messages)
+		userText := joinedUserText(turn)
+		var entry *convEntry
+		var fingerprint string
+		modelMismatch := ""
+		if len(prefix) > 0 && userText != "" {
+			fingerprint = conversationFingerprint(prefix)
+			if found, ok := defaultConversationCache.Lookup(session.accountKey, fingerprint); ok {
+				if found.model == selection.ModelID {
+					entry = found
 				} else {
-					log.Warnf("cursor: checkpoint found but resume request build failed, replaying full history: %v", errResume)
+					modelMismatch = found.model
 				}
-			case ok:
-				// Model switched mid-conversation: the checkpointed upstream
-				// conversation is pinned to another model, so it cannot be
-				// continued. Info because it explains a full re-bill.
-				log.Infof("cursor: checkpoint model mismatch, replaying full history (account=%s have=%s want=%s)", session.accountKey, entry.model, selection.ModelID)
-			case historyHasAssistant(prefix):
-				// A follow-up turn with no checkpoint replays the entire
-				// prefix uncached; log it so cache misses are visible in
-				// production without debug logging.
-				log.Infof("cursor: no checkpoint for follow-up, replaying full history (account=%s model=%s history=%d)", session.accountKey, selection.ModelID, len(prefix))
 			}
+		}
+		resumeMode := "turn"
+		if entry == nil && modelMismatch == "" {
+			// No checkpoint for the trailing-user-run split. Probe older
+			// turn-end boundaries: a tool-result continuation whose live
+			// session is gone ends in tool messages, and a client may have
+			// rewritten its recent history. Folding the un-checkpointed tail
+			// into the resumed turn keeps the provider cache for everything
+			// before it.
+			if found, fp, folded, ok := lookupTurnBoundaryResume(session.accountKey, selection.ModelID, messages); ok {
+				entry, fingerprint, userText = found, fp, folded
+				resumeMode = "fold"
+			}
+		}
+		switch {
+		case entry != nil:
+			cm, bs, cid, errResume := buildResumeRunRequest(model, entry, userText, tools)
+			if errResume == nil {
+				clientMsg, blobStore, conversationID = cm, bs, cid
+				session.resumed = true
+				session.resumeKey = fingerprint
+				log.Infof("cursor: resuming conversation %s from checkpoint (account=%s model=%s mode=%s)", cid, session.accountKey, selection.ModelID, resumeMode)
+			} else {
+				log.Warnf("cursor: checkpoint found but resume request build failed, replaying full history: %v", errResume)
+			}
+		case modelMismatch != "":
+			// Model switched mid-conversation: the checkpointed upstream
+			// conversation is pinned to another model, so it cannot be
+			// continued. Info because it explains a full re-bill.
+			log.Infof("cursor: checkpoint model mismatch, replaying full history (account=%s have=%s want=%s)", session.accountKey, modelMismatch, selection.ModelID)
+		case historyHasAssistant(messages):
+			// A follow-up turn with no checkpoint replays the entire
+			// history uncached; log it so cache misses are visible in
+			// production without debug logging.
+			log.Infof("cursor: no checkpoint for follow-up, replaying full history (account=%s model=%s history=%d)", session.accountKey, selection.ModelID, len(prefix))
 		}
 	}
 	if clientMsg == nil {
@@ -333,7 +354,7 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	session.renameToolsOnWire = claudeWireModel(selection.ModelID)
 	session.stream = stream
 	session.blobStore = blobStore
-	session.transcript = append([]ChatMessage(nil), messages...)
+	session.transcript = echoTranscript(messages)
 	session.tools = append([]ToolDefinition(nil), tools...)
 	session.toolIndex = indexTools(tools)
 	session.pending = map[string]*pendingExec{}
@@ -347,6 +368,24 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	go session.heartbeatLoop(runCtx)
 	go session.readLoop(runCtx)
 	return session, nil
+}
+
+// echoTranscript copies the request messages into the transcript mirror,
+// dropping the synthetic lost-session replay note. The client never saw that
+// message and will not echo it back, so hashing it into the stored checkpoint
+// fingerprint would make every later turn of the conversation miss the cache
+// — one lost tool session used to un-cache a conversation permanently.
+func echoTranscript(messages []ChatMessage) []ChatMessage {
+	out := append([]ChatMessage(nil), messages...)
+	for len(out) > 0 {
+		last := &out[len(out)-1]
+		if last.Role == "user" && strings.HasPrefix(strings.TrimSpace(last.Content), replayNoteMarker) {
+			out = out[:len(out)-1]
+			continue
+		}
+		break
+	}
+	return out
 }
 
 func indexTools(tools []ToolDefinition) map[string]*ToolDefinition {

@@ -171,6 +171,101 @@ func joinedUserText(turn []ChatMessage) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// foldTurnTailResultLimit caps each tool result repeated in a folded turn
+// tail. Unlike the lost-session replay note, the fold is the only place the
+// result reaches the model on a checkpoint resume, so the cap is generous.
+const foldTurnTailResultLimit = 20000
+
+// foldTurnTailText renders the un-checkpointed tail of a request — the user
+// messages, partial assistant reply, tool calls and tool results that came
+// after the last completed turn — as the single user message a checkpoint
+// resume can carry. A resumed run only accepts text for its new turn, so the
+// structured tail has to be restated in prose. The synthetic lost-session
+// replay note is skipped: it merely truncates the same tool results that are
+// folded here in full.
+func foldTurnTailText(tail []ChatMessage) string {
+	var b strings.Builder
+	toolActivity := false
+	write := func(s string) {
+		if strings.TrimSpace(s) == "" {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(s)
+	}
+	for i := range tail {
+		msg := &tail[i]
+		switch msg.Role {
+		case "user", "system":
+			if strings.HasPrefix(strings.TrimSpace(msg.Content), replayNoteMarker) {
+				continue
+			}
+			write(msg.Content)
+		case "assistant":
+			if strings.TrimSpace(msg.Content) != "" {
+				write("[your reply so far]\n" + msg.Content)
+			}
+			for j := range msg.ToolCalls {
+				toolActivity = true
+				write(foldToolCallText(&msg.ToolCalls[j]))
+			}
+		case "tool":
+			toolActivity = true
+			content := msg.Content
+			if len(content) > foldTurnTailResultLimit {
+				content = content[:foldTurnTailResultLimit] + "\n… (truncated)"
+			}
+			write(fmt.Sprintf("[tool result %s id=%s]\n%s", strings.TrimSpace(msg.Name), NormalizeToolCallID(msg.ToolCallID), content))
+		}
+	}
+	if toolActivity {
+		write("[The tool calls above have already run; continue the task from their results and do not repeat them.]")
+	}
+	return b.String()
+}
+
+// maxCheckpointBoundaryProbes bounds how many turn-end boundaries a fallback
+// lookup hashes. The last completed turn sits near the end of the request, so
+// a handful of probes is enough.
+const maxCheckpointBoundaryProbes = 8
+
+// lookupTurnBoundaryResume probes older turn-end boundaries of a request for
+// a stored checkpoint when the trailing-user-run lookup found none. It covers
+// the requests that split cannot: a tool-result continuation whose live
+// session is gone (the trailing messages are tool results, not a user run),
+// and a client that rewrote its recent history. Checkpoints are stored at
+// turn end, when the transcript closes with an assistant text reply, so only
+// those positions are probed. On a hit the entry is returned together with
+// the folded tail that becomes the resumed turn's user message.
+func lookupTurnBoundaryResume(accountKey, wireModelID string, messages []ChatMessage) (*convEntry, string, string, bool) {
+	probes := 0
+	for i := len(messages) - 1; i >= 1 && probes < maxCheckpointBoundaryProbes; i-- {
+		prev := &messages[i-1]
+		if prev.Role != "assistant" || strings.TrimSpace(prev.Content) == "" || len(prev.ToolCalls) > 0 {
+			continue
+		}
+		probes++
+		fingerprint := conversationFingerprint(messages[:i])
+		entry, ok := defaultConversationCache.LookupNoWait(accountKey, fingerprint)
+		if !ok {
+			continue
+		}
+		if entry.model != wireModelID {
+			// The conversation is pinned to another model upstream; an older
+			// boundary would be, too.
+			return nil, "", "", false
+		}
+		text := foldTurnTailText(messages[i:])
+		if strings.TrimSpace(text) == "" {
+			return nil, "", "", false
+		}
+		return entry, fingerprint, text, true
+	}
+	return nil, "", "", false
+}
+
 // resolveRunModelDetails applies catalog overrides to a model selection and
 // renders the ModelDetails proto the Agent run needs.
 func resolveRunModelDetails(selection *ModelSelection) *agentv1.ModelDetails {

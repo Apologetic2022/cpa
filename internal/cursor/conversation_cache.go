@@ -5,11 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	agentv1 "github.com/router-for-me/CLIProxyAPI/v7/internal/cursor/proto/agent/v1"
+	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/proto"
 )
 
 // Conversation continuation cache.
@@ -107,18 +110,36 @@ func (c *conversationCache) Lookup(accountKey, fingerprint string) (*convEntry, 
 	}
 	key := convCacheKey(accountKey, fingerprint)
 	entry, ok, wait := c.lookupOnce(key)
-	if ok || wait == nil {
+	if ok {
 		return entry, ok
 	}
-	// The turn that produced this transcript has ended but its checkpoint is
-	// still in flight; wait for the store instead of replaying the whole
-	// conversation under a fresh upstream conversation id.
-	select {
-	case <-wait:
-	case <-time.After(convPendingWait):
+	if wait != nil {
+		// The turn that produced this transcript has ended but its checkpoint
+		// is still in flight; wait for the store instead of replaying the
+		// whole conversation under a fresh upstream conversation id.
+		select {
+		case <-wait:
+		case <-time.After(convPendingWait):
+		}
+		if entry, ok, _ = c.lookupOnce(key); ok {
+			return entry, ok
+		}
 	}
-	entry, ok, _ = c.lookupOnce(key)
-	return entry, ok
+	return c.loadPersisted(key)
+}
+
+// LookupNoWait returns a stored entry without blocking on an in-flight store.
+// Fallback boundary probes use it: they hash several candidate prefixes, and
+// only the exact turn-end transcript could ever be pending.
+func (c *conversationCache) LookupNoWait(accountKey, fingerprint string) (*convEntry, bool) {
+	if accountKey == "" || fingerprint == "" {
+		return nil, false
+	}
+	key := convCacheKey(accountKey, fingerprint)
+	if entry, ok, _ := c.lookupOnce(key); ok {
+		return entry, ok
+	}
+	return c.loadPersisted(key)
 }
 
 // lookupOnce returns the live entry for key, or the pending-store channel a
@@ -180,20 +201,23 @@ func (c *conversationCache) Store(accountKey, fingerprint string, entry *convEnt
 	entry.expiresAt = time.Now().Add(convCacheTTL)
 	key := convCacheKey(accountKey, fingerprint)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if len(c.entries) >= convCacheMaxSize {
 		c.pruneLocked()
 	}
 	c.entries[key] = entry
+	c.mu.Unlock()
+	persistConvEntry(key, entry)
 }
 
 func (c *conversationCache) Invalidate(accountKey, fingerprint string) {
 	if accountKey == "" || fingerprint == "" {
 		return
 	}
+	key := convCacheKey(accountKey, fingerprint)
 	c.mu.Lock()
-	delete(c.entries, convCacheKey(accountKey, fingerprint))
+	delete(c.entries, key)
 	c.mu.Unlock()
+	removePersistedConvEntry(key)
 }
 
 // pruneLocked drops expired entries first; if the cache is still full it
@@ -219,6 +243,184 @@ func (c *conversationCache) pruneLocked() {
 		}
 		delete(c.entries, oldestKey)
 	}
+}
+
+// Checkpoint persistence.
+//
+// The conversation cache is what keeps Cursor's provider-side prompt cache
+// warm, and it used to live only in memory: every gateway restart (deploys
+// most of all) re-billed the full history of every active conversation on its
+// next turn. Entries are therefore mirrored to disk — one file per
+// (account, fingerprint) — and loaded back lazily on a memory miss. The files
+// contain conversation history blobs in the clear, like the request logs on
+// the same host; CPA_CURSOR_CONV_PERSIST=0 disables the mirror.
+
+// persistedConvEntry is the on-disk form of a convEntry. State holds the
+// marshalled ConversationStateStructure proto.
+type persistedConvEntry struct {
+	ConversationID string            `json:"conversation_id"`
+	Model          string            `json:"model"`
+	ExpiresAtUnix  int64             `json:"expires_at_unix"`
+	State          []byte            `json:"state"`
+	Blobs          map[string][]byte `json:"blobs,omitempty"`
+}
+
+// convPersistEnabled gates the disk mirror; on by default.
+func convPersistEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CPA_CURSOR_CONV_PERSIST"))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
+// convCacheDir resolves (and creates) the directory checkpoint files live in.
+// Empty means persistence is unavailable.
+func convCacheDir() string {
+	if !convPersistEnabled() {
+		return ""
+	}
+	dir := strings.TrimSpace(os.Getenv("CPA_CURSOR_CONV_CACHE_DIR"))
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil || strings.TrimSpace(base) == "" {
+			base = os.TempDir()
+		}
+		dir = filepath.Join(base, "cliproxy", "cursor-conversations")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// convEntryPath names the file for one cache key. The key embeds the account
+// and the transcript fingerprint, so its hash is collision-safe and reveals
+// neither.
+func convEntryPath(dir, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(dir, hex.EncodeToString(sum[:])+".ckpt")
+}
+
+// persistConvEntry mirrors a stored checkpoint to disk. Best effort: a failed
+// write only costs cache warmth after the next restart.
+func persistConvEntry(key string, entry *convEntry) {
+	dir := convCacheDir()
+	if dir == "" || entry == nil || entry.state == nil {
+		return
+	}
+	state, err := proto.Marshal(entry.state)
+	if err != nil {
+		return
+	}
+	payload, err := json.Marshal(persistedConvEntry{
+		ConversationID: entry.conversationID,
+		Model:          entry.model,
+		ExpiresAtUnix:  entry.expiresAt.Unix(),
+		State:          state,
+		Blobs:          entry.blobs,
+	})
+	if err != nil {
+		return
+	}
+	path := convEntryPath(dir, key)
+	tmp := path + ".tmp"
+	if err = os.WriteFile(tmp, payload, 0o600); err != nil {
+		return
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
+// removePersistedConvEntry drops the disk mirror of one cache key.
+func removePersistedConvEntry(key string) {
+	if dir := convCacheDir(); dir != "" {
+		_ = os.Remove(convEntryPath(dir, key))
+	}
+}
+
+// loadPersisted restores a checkpoint from disk after a memory miss (usually
+// a restart) and re-inserts it into the in-memory cache. Expired files are
+// removed on sight.
+func (c *conversationCache) loadPersisted(key string) (*convEntry, bool) {
+	dir := convCacheDir()
+	if dir == "" {
+		return nil, false
+	}
+	path := convEntryPath(dir, key)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var stored persistedConvEntry
+	if err = json.Unmarshal(payload, &stored); err != nil {
+		_ = os.Remove(path)
+		return nil, false
+	}
+	expiresAt := time.Unix(stored.ExpiresAtUnix, 0)
+	if time.Now().After(expiresAt) || strings.TrimSpace(stored.ConversationID) == "" {
+		_ = os.Remove(path)
+		return nil, false
+	}
+	state := &agentv1.ConversationStateStructure{}
+	if err = proto.Unmarshal(stored.State, state); err != nil {
+		_ = os.Remove(path)
+		return nil, false
+	}
+	entry := &convEntry{
+		conversationID: stored.ConversationID,
+		state:          state,
+		blobs:          stored.Blobs,
+		model:          stored.Model,
+		expiresAt:      expiresAt,
+	}
+	c.mu.Lock()
+	if existing, ok := c.entries[key]; ok {
+		// A concurrent store won the race; prefer the fresher entry.
+		c.mu.Unlock()
+		return existing, true
+	}
+	if len(c.entries) >= convCacheMaxSize {
+		c.pruneLocked()
+	}
+	c.entries[key] = entry
+	c.mu.Unlock()
+	log.Debugf("cursor: restored conversation checkpoint from disk conv=%s model=%s", entry.conversationID, entry.model)
+	return entry, true
+}
+
+// sweepPersistedConvEntries deletes expired checkpoint files. Called once at
+// startup so an abandoned gateway does not accumulate stale conversations.
+func sweepPersistedConvEntries() {
+	dir := convCacheDir()
+	if dir == "" {
+		return
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, file := range files {
+		name := file.Name()
+		if !strings.HasSuffix(name, ".ckpt") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		payload, errRead := os.ReadFile(path)
+		if errRead != nil {
+			continue
+		}
+		var stored persistedConvEntry
+		if json.Unmarshal(payload, &stored) != nil || now.After(time.Unix(stored.ExpiresAtUnix, 0)) {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func init() {
+	go sweepPersistedConvEntries()
 }
 
 // accountKeyFromCredentials scopes conversation continuations to one Cursor

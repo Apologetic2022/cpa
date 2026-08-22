@@ -10,6 +10,13 @@ import (
 // copy only has to be long enough for the model to act on.
 const replayToolResultLimit = 4000
 
+// replayNoteMarker opens the synthetic user message a lost-session replay
+// appends. It identifies that message later: the client never saw it, so the
+// transcript mirror (and therefore the checkpoint fingerprint) must not
+// contain it, and a checkpoint-fold resume must not duplicate the results it
+// restates.
+const replayNoteMarker = "The tool calls you requested have already run."
+
 // ReplayMessagesForLostSession rewrites a tool-result resume request into a
 // self-contained prompt.
 //
@@ -24,7 +31,7 @@ func ReplayMessagesForLostSession(messages []ChatMessage, results []ToolResult) 
 		return messages
 	}
 	var b strings.Builder
-	b.WriteString("The tool calls you requested have already run. Their results are below; continue the task with them and do not repeat the same calls.\n")
+	b.WriteString(replayNoteMarker + " Their results are below; continue the task with them and do not repeat the same calls.\n")
 	for _, result := range results {
 		name := strings.TrimSpace(result.Name)
 		if name == "" {

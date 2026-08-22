@@ -40,6 +40,98 @@ func TestConversationFingerprintMatchesClientEcho(t *testing.T) {
 	}
 }
 
+func TestLookupTurnBoundaryResumeFoldsToolTail(t *testing.T) {
+	t.Setenv("CPA_CURSOR_CONV_CACHE_DIR", t.TempDir())
+	// Checkpoint stored at the end of turn 1.
+	stored := []ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+	}
+	fp := conversationFingerprint(stored)
+	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
+	defaultConversationCache.Store("acct-boundary", fp, &convEntry{conversationID: "conv-b", state: state, model: "claude-sonnet-5"})
+	defer defaultConversationCache.Invalidate("acct-boundary", fp)
+
+	// Turn 2 called a tool, the live session was lost, and the continuation
+	// request now ends with the tool result plus the synthetic replay note.
+	continuation := append(append([]ChatMessage(nil), stored...),
+		ChatMessage{Role: "user", Content: "second question"},
+		ChatMessage{Role: "assistant", Content: "checking", ToolCalls: []ToolCall{
+			{ID: "c1", Name: "Shell", Arguments: map[string]any{"cmd": "ls"}},
+		}},
+		ChatMessage{Role: "tool", Name: "Shell", ToolCallID: "c1", Content: "a.txt full output"},
+		ChatMessage{Role: "user", Content: replayNoteMarker + " Their results are below.\n<tool_result>a.txt</tool_result>"},
+	)
+	entry, gotFp, folded, ok := lookupTurnBoundaryResume("acct-boundary", "claude-sonnet-5", continuation)
+	if !ok || entry == nil || entry.conversationID != "conv-b" || gotFp != fp {
+		t.Fatalf("expected boundary resume hit, got ok=%v entry=%+v", ok, entry)
+	}
+	for _, want := range []string{"second question", "Shell", "a.txt full output", "already run"} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("folded tail must carry %q, got %q", want, folded)
+		}
+	}
+	if strings.Contains(folded, replayNoteMarker) {
+		t.Fatalf("folded tail must skip the synthetic replay note, got %q", folded)
+	}
+
+	// A checkpoint pinned to another model cannot be continued.
+	if _, _, _, ok = lookupTurnBoundaryResume("acct-boundary", "grok-4.6", continuation); ok {
+		t.Fatalf("boundary resume must refuse a model mismatch")
+	}
+}
+
+func TestEchoTranscriptStripsReplayNote(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "user", Content: "question"},
+		{Role: "assistant", Content: "checking", ToolCalls: []ToolCall{{ID: "c1", Name: "Shell"}}},
+		{Role: "tool", ToolCallID: "c1", Content: "out"},
+		{Role: "user", Content: replayNoteMarker + " Their results are below."},
+	}
+	mirror := echoTranscript(messages)
+	if len(mirror) != 3 || mirror[len(mirror)-1].Role != "tool" {
+		t.Fatalf("synthetic replay note must not enter the transcript mirror, got %+v", mirror)
+	}
+	// A genuine trailing user message stays.
+	plain := []ChatMessage{{Role: "user", Content: "hello"}}
+	if got := echoTranscript(plain); len(got) != 1 {
+		t.Fatalf("real user messages must stay, got %+v", got)
+	}
+}
+
+func TestConversationCachePersistsAcrossRestart(t *testing.T) {
+	t.Setenv("CPA_CURSOR_CONV_CACHE_DIR", t.TempDir())
+	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn-a"), []byte("turn-b")}}
+	before := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]*pendingMarker{}}
+	before.Store("acct", "fp-persist", &convEntry{
+		conversationID: "conv-persist",
+		state:          state,
+		blobs:          map[string][]byte{"blob1": []byte("payload")},
+		model:          "claude-sonnet-5",
+	})
+
+	// A fresh cache simulates the gateway restarting.
+	after := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]*pendingMarker{}}
+	entry, ok := after.Lookup("acct", "fp-persist")
+	if !ok || entry == nil {
+		t.Fatalf("expected the checkpoint to survive a restart")
+	}
+	if entry.conversationID != "conv-persist" || entry.model != "claude-sonnet-5" {
+		t.Fatalf("restored entry mismatch: %+v", entry)
+	}
+	if len(entry.state.GetTurns()) != 2 || string(entry.blobs["blob1"]) != "payload" {
+		t.Fatalf("restored state/blobs mismatch: %+v", entry)
+	}
+
+	// Invalidation removes the disk mirror too.
+	after.Invalidate("acct", "fp-persist")
+	again := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]*pendingMarker{}}
+	if _, ok = again.Lookup("acct", "fp-persist"); ok {
+		t.Fatalf("invalidated checkpoint must not resurrect from disk")
+	}
+}
+
 func TestConversationCacheRoundTrip(t *testing.T) {
 	cache := &conversationCache{entries: map[string]*convEntry{}}
 	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
