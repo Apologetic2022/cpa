@@ -51,18 +51,39 @@ type convEntry struct {
 	expiresAt      time.Time
 }
 
+// pendingMarker tracks one in-flight checkpoint store. Two paths race to
+// release its waiters: the owning session's resolve func, and a takeover in
+// BeginPending when a duplicate turn (same account + transcript) finishes
+// while the first store is still trailing in. closed is guarded by the cache
+// mutex so whichever path loses the race becomes a no-op instead of a double
+// close — an unguarded double close panics and takes the whole gateway down,
+// wiping every cached checkpoint with it.
+type pendingMarker struct {
+	ch     chan struct{}
+	closed bool
+}
+
+// closeLocked releases waiters exactly once. The caller must hold the cache
+// mutex.
+func (m *pendingMarker) closeLocked() {
+	if !m.closed {
+		m.closed = true
+		close(m.ch)
+	}
+}
+
 type conversationCache struct {
 	mu      sync.Mutex
 	entries map[string]*convEntry
 	// pending marks fingerprints whose checkpoint is still trailing in from
 	// the upstream stream. Lookup blocks briefly on these instead of treating
 	// the gap as a miss.
-	pending map[string]chan struct{}
+	pending map[string]*pendingMarker
 }
 
 var defaultConversationCache = &conversationCache{
 	entries: map[string]*convEntry{},
-	pending: map[string]chan struct{}{},
+	pending: map[string]*pendingMarker{},
 }
 
 // conversationReuseEnabled gates checkpoint continuation. On by default;
@@ -116,7 +137,10 @@ func (c *conversationCache) lookupOnce(key string) (*convEntry, bool, chan struc
 		entry.expiresAt = now.Add(convCacheTTL)
 		return entry, true, nil
 	}
-	return nil, false, c.pending[key]
+	if marker := c.pending[key]; marker != nil {
+		return nil, false, marker.ch
+	}
+	return nil, false, nil
 }
 
 // BeginPending announces that the checkpoint for (accountKey, fingerprint) is
@@ -128,25 +152,24 @@ func (c *conversationCache) BeginPending(accountKey, fingerprint string) func() 
 		return func() {}
 	}
 	key := convCacheKey(accountKey, fingerprint)
-	ch := make(chan struct{})
+	marker := &pendingMarker{ch: make(chan struct{})}
 	c.mu.Lock()
-	// A stale marker for the same key (e.g. a retried turn) is released so
-	// its waiters re-check instead of hanging on an orphaned channel.
+	// A stale marker for the same key (e.g. a retried or duplicate turn) is
+	// released so its waiters re-check instead of hanging on an orphaned
+	// channel. Its owner's resolve func may still fire later; closeLocked
+	// keeps that from double-closing.
 	if prev, ok := c.pending[key]; ok {
-		close(prev)
+		prev.closeLocked()
 	}
-	c.pending[key] = ch
+	c.pending[key] = marker
 	c.mu.Unlock()
-	var once sync.Once
 	return func() {
-		once.Do(func() {
-			c.mu.Lock()
-			if c.pending[key] == ch {
-				delete(c.pending, key)
-			}
-			c.mu.Unlock()
-			close(ch)
-		})
+		c.mu.Lock()
+		if c.pending[key] == marker {
+			delete(c.pending, key)
+		}
+		marker.closeLocked()
+		c.mu.Unlock()
 	}
 }
 

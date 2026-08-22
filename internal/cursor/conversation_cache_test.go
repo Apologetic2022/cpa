@@ -58,7 +58,7 @@ func TestConversationCacheRoundTrip(t *testing.T) {
 }
 
 func TestLookupWaitsForPendingStore(t *testing.T) {
-	cache := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]chan struct{}{}}
+	cache := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]*pendingMarker{}}
 	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
 
 	resolve := cache.BeginPending("acct", "fp")
@@ -99,6 +99,39 @@ func TestLookupWaitsForPendingStore(t *testing.T) {
 	}
 	if waited := time.Since(start); waited > 500*time.Millisecond {
 		t.Fatalf("plain miss must not wait (waited %s)", waited)
+	}
+}
+
+func TestBeginPendingTakeoverDoesNotDoubleClose(t *testing.T) {
+	// Two turns with the same (account, transcript) can overlap: the second
+	// BeginPending takes over the pending slot and releases the first
+	// marker's waiters. When the first turn's resolve fires afterwards it
+	// used to close the already-closed channel and panic, crashing the
+	// gateway and wiping the whole conversation cache (seen in production).
+	cache := &conversationCache{entries: map[string]*convEntry{}, pending: map[string]*pendingMarker{}}
+
+	resolveA := cache.BeginPending("acct", "fp")
+	resolveB := cache.BeginPending("acct", "fp")
+
+	resolveA() // must not panic even though B's takeover already closed A
+	resolveB()
+	resolveA() // resolve funcs stay idempotent
+	resolveB()
+
+	if len(cache.pending) != 0 {
+		t.Fatalf("pending map must be empty after all resolves, got %d entries", len(cache.pending))
+	}
+
+	// The slot stays usable afterwards.
+	resolve := cache.BeginPending("acct", "fp")
+	state := &agentv1.ConversationStateStructure{Turns: [][]byte{[]byte("turn")}}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cache.Store("acct", "fp", &convEntry{conversationID: "conv-after", state: state, model: "grok-4.6"})
+		resolve()
+	}()
+	if entry, ok := cache.Lookup("acct", "fp"); !ok || entry.conversationID != "conv-after" {
+		t.Fatalf("lookup after takeover must still work, got ok=%v entry=%+v", ok, entry)
 	}
 }
 

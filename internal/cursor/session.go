@@ -234,14 +234,28 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 	if !session.allowImages && conversationReuseEnabled() && session.accountKey != "" {
 		if history, activeUser, errSplit := splitActiveUser(messages); errSplit == nil {
 			fingerprint := conversationFingerprint(history)
-			if entry, ok := defaultConversationCache.Lookup(session.accountKey, fingerprint); ok && entry.model == selection.ModelID {
+			entry, ok := defaultConversationCache.Lookup(session.accountKey, fingerprint)
+			switch {
+			case ok && entry.model == selection.ModelID:
 				cm, bs, cid, errResume := buildResumeRunRequest(model, entry, activeUser.Content, tools)
 				if errResume == nil {
 					clientMsg, blobStore, conversationID = cm, bs, cid
 					session.resumed = true
 					session.resumeKey = fingerprint
-					log.Debugf("cursor: resuming conversation %s from checkpoint (account=%s)", cid, session.accountKey)
+					log.Infof("cursor: resuming conversation %s from checkpoint (account=%s model=%s)", cid, session.accountKey, selection.ModelID)
+				} else {
+					log.Warnf("cursor: checkpoint found but resume request build failed, replaying full history: %v", errResume)
 				}
+			case ok:
+				// Model switched mid-conversation: the checkpointed upstream
+				// conversation is pinned to another model, so it cannot be
+				// continued. Info because it explains a full re-bill.
+				log.Infof("cursor: checkpoint model mismatch, replaying full history (account=%s have=%s want=%s)", session.accountKey, entry.model, selection.ModelID)
+			case historyHasAssistant(history):
+				// A follow-up turn with no checkpoint replays the entire
+				// prefix uncached; log it so cache misses are visible in
+				// production without debug logging.
+				log.Infof("cursor: no checkpoint for follow-up, replaying full history (account=%s model=%s history=%d)", session.accountKey, selection.ModelID, len(history))
 			}
 		}
 	}
@@ -279,7 +293,7 @@ func StartSession(ctx context.Context, creds AccountCredentials, model string, m
 		defaultConversationCache.Invalidate(session.accountKey, session.resumeKey)
 		session.resumed = false
 		session.resumeKey = ""
-		log.Debugf("cursor: checkpoint resume rejected, rebuilding conversation: %v", err)
+		log.Warnf("cursor: checkpoint resume rejected, rebuilding conversation: %v", err)
 		clientMsg, blobStore, conversationID, err = buildRunRequest(model, messages, tools, session.allowImages)
 		if err != nil {
 			cancel()
@@ -609,7 +623,7 @@ func (s *Session) storeConversationSnapshot() {
 		model:          model,
 	})
 	s.resolvePending()
-	log.Debugf("cursor: stored conversation checkpoint conv=%s account=%s turns=%d", convID, accountKey, len(state.GetTurns()))
+	log.Infof("cursor: stored conversation checkpoint conv=%s account=%s turns=%d", convID, accountKey, len(state.GetTurns()))
 }
 
 // resolvePending releases the pending-store marker, waking lookups that were

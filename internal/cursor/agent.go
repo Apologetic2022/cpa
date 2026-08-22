@@ -132,6 +132,18 @@ func splitActiveUser(messages []ChatMessage) ([]ChatMessage, *ChatMessage, error
 	return nil, nil, fmt.Errorf("cursor: request has no user message")
 }
 
+// historyHasAssistant reports whether the history already contains a model
+// reply, i.e. the request is a follow-up turn rather than the start of a new
+// conversation.
+func historyHasAssistant(messages []ChatMessage) bool {
+	for i := range messages {
+		if messages[i].Role == "assistant" {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveRunModelDetails applies catalog overrides to a model selection and
 // renders the ModelDetails proto the Agent run needs.
 func resolveRunModelDetails(selection *ModelSelection) *agentv1.ModelDetails {
