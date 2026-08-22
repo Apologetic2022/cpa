@@ -255,6 +255,7 @@ func foldToolCallText(tc *ToolCall) string {
 
 func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
+	claudeUpstream := claudeWireModel(selection.ModelID)
 	blobStore := map[string][]byte{}
 	systemPrompt := "You are a helpful assistant."
 	if !allowImages {
@@ -264,6 +265,13 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 		// spending half a minute on an image nobody will receive and then
 		// reporting it as delivered.
 		systemPrompt += " You cannot generate images in this conversation: your image generation tool is unavailable. If the user asks for an image, say so plainly instead of calling the tool or claiming an image was produced."
+	}
+	if claudeUpstream && len(tools) > 0 {
+		// Client tools are registered under mcp_-prefixed names on claude
+		// (see claudeWireModel). Without this note the model burns whole
+		// segments retrying the workspace built-ins of the same name, which
+		// run nowhere in this headless setup.
+		systemPrompt += " Tool note: only the mcp_-prefixed tools attached to this conversation actually work here. Built-in workspace tools (Shell, Read, Grep, Glob, Edit, Write, ...) are unavailable; do not call them or wait on them."
 	}
 	systemBlob := storeBlob(blobStore, mustJSON(map[string]any{
 		"role":    "system",
@@ -277,7 +285,6 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 
 	// Track tool names so tool-result parts can include toolName (cursor2api).
 	toolNames := map[string]string{}
-	claudeUpstream := claudeWireModel(selection.ModelID)
 	foldTools := claudeUpstream
 	rootIDs := [][]byte{systemBlob}
 	for _, msg := range history {
