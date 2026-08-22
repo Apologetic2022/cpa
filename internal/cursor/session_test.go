@@ -132,6 +132,56 @@ func TestBuildRunRequestNativeToolJSON(t *testing.T) {
 	}
 }
 
+func TestBuildRunRequestFoldsToolHistoryForClaude(t *testing.T) {
+	// Cursor's Anthropic upstream rejects replayed histories with structured
+	// tool-call/tool-result parts (thinking blocks cannot be restored), so a
+	// claude replay must fold them into plain text.
+	msg, blobs, _, err := buildRunRequest("claude-sonnet-5", []ChatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "checking", ToolCalls: []ToolCall{
+			{ID: "c1", Name: "get_weather", Arguments: map[string]any{"city": "NY"}},
+		}},
+		{Role: "tool", ToolCallID: "c1", Name: "get_weather", Content: `{"ok":true}`},
+		{Role: "user", Content: "again"},
+	}, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.GetRunRequest() == nil {
+		t.Fatal("missing run request")
+	}
+	var sawFoldedCall, sawFoldedResult bool
+	for _, data := range blobs {
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		role, _ := payload["role"].(string)
+		if role == "tool" {
+			t.Fatalf("claude replay must not contain tool-role blobs: %#v", payload)
+		}
+		content, _ := payload["content"].([]any)
+		for _, part := range content {
+			m, _ := part.(map[string]any)
+			switch m["type"] {
+			case "tool-call", "tool-result":
+				t.Fatalf("claude replay must not contain structured tool parts: %#v", payload)
+			case "text":
+				text, _ := m["text"].(string)
+				if role == "assistant" && strings.Contains(text, "get_weather") && strings.Contains(text, "c1") {
+					sawFoldedCall = true
+				}
+				if role == "user" && strings.Contains(text, `{"ok":true}`) && strings.Contains(text, "c1") {
+					sawFoldedResult = true
+				}
+			}
+		}
+	}
+	if !sawFoldedCall || !sawFoldedResult {
+		t.Fatalf("folded tool history missing call=%v result=%v", sawFoldedCall, sawFoldedResult)
+	}
+}
+
 func TestCookieJarRemembersSetCookie(t *testing.T) {
 	jar := &CookieJar{byHost: map[string]map[string]string{}}
 	hdr := make(http.Header)

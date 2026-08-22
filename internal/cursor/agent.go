@@ -222,6 +222,30 @@ func buildResumeRunRequest(model string, entry *convEntry, userText string, tool
 	return client, blobStore, conversationID, nil
 }
 
+// replayToolsAsText reports whether a replayed history must fold its tool
+// calls and tool results into plain text for this model. Cursor serves every
+// claude model as a thinking variant, and its Anthropic upstream rejects a
+// replayed history that carries structured tool-call/tool-result parts
+// without their original signed thinking blocks: the run dies immediately
+// with ERROR_PROVIDER_ERROR (provider 400, not retryable), so a claude
+// conversation could never be rebuilt once its checkpoint or live session was
+// gone. Text-folded history sidesteps the constraint; grok / composer / gpt
+// accept the structured form and keep it.
+func replayToolsAsText(wireModelID string) bool {
+	return strings.Contains(strings.ToLower(wireModelID), "claude")
+}
+
+// foldToolCallText renders one historical tool call as plain text.
+func foldToolCallText(tc *ToolCall) string {
+	args := "{}"
+	if len(tc.Arguments) > 0 {
+		if b, err := json.Marshal(tc.Arguments); err == nil {
+			args = string(b)
+		}
+	}
+	return fmt.Sprintf("[called tool %s id=%s arguments=%s]", strings.TrimSpace(tc.Name), NormalizeToolCallID(tc.ID), args)
+}
+
 func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinition, allowImages bool) (*agentv1.AgentClientMessage, map[string][]byte, string, error) {
 	selection := ResolveRequestedModel(model)
 	blobStore := map[string][]byte{}
@@ -246,6 +270,7 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 
 	// Track tool names so tool-result parts can include toolName (cursor2api).
 	toolNames := map[string]string{}
+	foldTools := replayToolsAsText(selection.ModelID)
 	rootIDs := [][]byte{systemBlob}
 	for _, msg := range history {
 		switch msg.Role {
@@ -261,6 +286,29 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			})))
 		case "assistant":
 			if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 {
+				continue
+			}
+			if foldTools {
+				var b strings.Builder
+				if strings.TrimSpace(msg.Content) != "" {
+					b.WriteString(msg.Content)
+				}
+				for i := range msg.ToolCalls {
+					tc := &msg.ToolCalls[i]
+					if strings.TrimSpace(tc.ID) != "" && strings.TrimSpace(tc.Name) != "" {
+						toolNames[tc.ID] = tc.Name
+					}
+					if b.Len() > 0 {
+						b.WriteString("\n\n")
+					}
+					b.WriteString(foldToolCallText(tc))
+				}
+				rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
+					"role": "assistant",
+					"content": []map[string]string{
+						{"type": "text", "text": b.String()},
+					},
+				})))
 				continue
 			}
 			content := make([]map[string]any, 0, 1+len(msg.ToolCalls))
@@ -299,6 +347,16 @@ func buildRunRequest(model string, messages []ChatMessage, tools []ToolDefinitio
 			toolName := strings.TrimSpace(msg.Name)
 			if toolName == "" {
 				toolName = toolNames[msg.ToolCallID]
+			}
+			if foldTools {
+				text := fmt.Sprintf("[tool result %s id=%s]\n%s", toolName, NormalizeToolCallID(msg.ToolCallID), msg.Content)
+				rootIDs = append(rootIDs, storeBlob(blobStore, mustJSON(map[string]any{
+					"role": "user",
+					"content": []map[string]string{
+						{"type": "text", "text": text},
+					},
+				})))
+				continue
 			}
 			resultPart := map[string]any{
 				"type":       "tool-result",
